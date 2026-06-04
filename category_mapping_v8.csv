@@ -1,0 +1,28 @@
+category_id,nama_kategori,kategori_srs,tipe
+1,Makan Pokok,Makanan,expense
+2,Jajanan & Minuman,Makanan,expense
+3,Kopi & Minuman,Makanan,expense
+4,Transportasi,Transportasi,expense
+5,Rokok & Vape,Lain-lain,expense
+6,Cafe & Hiburan,Hiburan,expense
+7,Hiburan & Rekreasi,Hiburan,expense
+8,Gaming & Top-up,Hiburan,expense
+9,Langganan Digital,Hiburan,expense
+10,Skincare & Fashion,Lain-lain,expense
+11,Belanja & Kebutuhan,Lain-lain,expense
+12,Harbolnas / Flash Sale,Lain-lain,expense
+13,Tagihan Tetap,Tagihan,expense
+14,Komunikasi,Tagihan,expense
+15,Jebakan Cicilan,Tagihan,expense
+16,Denda & Bunga Paylater,Tagihan,expense
+17,Transaksi Sosial,Lain-lain,expense
+18,Donasi & Infaq,Lain-lain,expense
+19,Pengeluaran Darurat,Lain-lain,expense
+20,Financial Shock,Lain-lain,expense
+21,Doom Spending,Lain-lain,expense
+22,Tabungan & Investasi,Tabungan,expense
+23,Tidak Diketahui,Lain-lain,expense
+24,Pemasukan Utama,Pemasukan,income
+25,THR / Bonus Tahunan,Pemasukan,income
+26,Penghasilan Sampingan,Pemasukan,income
+27,Uang Saku Orang Tua,Pemasukan,income
