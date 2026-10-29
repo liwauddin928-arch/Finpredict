@@ -1,1680 +1,1593 @@
 # =============================================================================
-#  FinPredict v11.0 — AI Financial Forecasting Dashboard
-#  Desain: dark KPI header, clean chart, icon sidebar — inspired by ref image
-#  All LSTM logic preserved from v10 — only design upgraded
-#  Capstone Dicoding × DBS Foundation
+#  FinPredict — 07_dashboard.py
+#  Dashboard Analitik Interaktif (Streamlit)                       Versi 9.0
+#  Capstone Coding Camp 2026 powered by DBS Foundation · Tim CC26-PSU290
+# =============================================================================
+#
+#  TUJUAN
+#  ──────
+#  Menampilkan insight dan kesimpulan Data Science FinPredict secara interaktif,
+#  mengikuti tugas Data Science pada Project Brief:
+#    • pertanyaan bisnis terukur (Q1–Q5)        • data wrangling end-to-end
+#    • EDA + explanatory analysis               • data siap model + Data Dictionary
+#    • feature engineering & A/B testing        • dashboard interaktif Streamlit
+#
+#  HALAMAN
+#  ───────
+#   1. Ringkasan              KPI, 5 pertanyaan bisnis & jawabannya
+#   2. Data Wrangling         gathering → assessing → cleaning → siap model
+#   3. Eksplorasi Pengeluaran EDA pola waktu, kategori, perilaku   (Q1, Q2)
+#   4. Risiko Defisit         kapan & siapa yang berisiko          (Q3)
+#   5. Early Warning          status per pengguna + proyeksi 30 hari (Q5)
+#   6. Evaluasi Model         perbandingan LSTM/GRU/XGBoost/RF     (Q4)
+#   7. A/B Testing            dampak Early Warning (simulasi)      (Q5)
+#   8. Data Dictionary        dokumentasi kolom & kelompok fitur
+#   9. Unduh Data             ekspor CSV sesuai filter
+#
+#  CARA MENJALANKAN
+#  ────────────────
+#    pip install -r requirements.txt
+#    streamlit run 07_dashboard.py
+#
+#  FILE DATA
+#  ─────────
+#  Dicari otomatis relatif terhadap lokasi skrip ini, baik pada struktur repo
+#  (02_Clean_Data/, 03_Category_Mapping/, …) maupun semua file di satu folder.
+#  Wajib : transactions_clean_v8.csv, daily_features_v8.csv
+#  Opsional (halaman terkait menampilkan pemberitahuan bila tidak ada):
+#     category_mapping_v8.csv · data_dictionary_v8.csv · split_info_v8.csv
+#     model_results.csv · ab_testing_results.csv · model_xgb.json
+#     scaled_full_v8.csv · raw_dirty_v8.csv
+#
+#  CATATAN
+#  ───────
+#  Dashboard TIDAK membuat data pengganti. Jika file wajib tidak ditemukan,
+#  aplikasi berhenti dengan pesan yang jelas (versi lama diam-diam memakai
+#  data acak sehingga grafik tampak benar padahal palsu).
 # =============================================================================
 
-import os
-import pickle
-import warnings
-from datetime import datetime, timedelta
+from __future__ import annotations
+
+import html
+import json
+import re
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-from plotly.subplots import make_subplots
 import streamlit as st
 
-warnings.filterwarnings("ignore")
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
-
-# ══════════════════════════════════════════════════════════════
-#  CONSTANTS
-# ══════════════════════════════════════════════════════════════
-SEQ_LEN         = 30
-N_FEATURES      = 39
-THRESH_LOW      = 0.40
-THRESH_HIGH     = 0.70
-SAVINGS_TARGET  = 0.10
-DTR_CRITICAL    = 7
-DTR_WARNING     = 14
-DTR_SENTINEL    = 9_999
-DOOM_RATE_ALERT = 0.02
-DEFICIT_ALERT   = 0.55
-WANTS_ALERT     = 0.60
-
-FEATURE_COLS = [
-    "total_pengeluaran_harian","total_pemasukan_harian","total_wants_harian",
-    "doom_spending_harian","shock_harian","pengeluaran_makanan","usia",
-    "saldo_bersih_harian","saldo_berjalan","rasio_wants",
-    "is_doom_spending","is_financial_shock","tipe_user_encoded",
-    "hari_dalam_bulan","hari_dalam_minggu","is_weekend","bulan",
-    "is_harbolnas","fase_bulan_encoded",
-    "sin_doy","cos_doy","sin_dom","cos_dom",
-    "pengeluaran_lag_1d","pengeluaran_lag_3d","pengeluaran_lag_7d",
-    "saldo_lag_1d","wants_lag_3d","doom_lag_7d",
-    "rolling_mean_7d","rolling_mean_14d","rolling_mean_30d",
-    "rolling_std_7d","rolling_max_7d","rolling_wants_7d",
-    "days_to_ruin","interaksi_hedon_muda","kebiasaan_boros_harian","rasio_makanan",
-]
-REQUIRED_COLS = [
-    "user_id","tanggal_transaksi","saldo_berjalan",
-    "label_defisit_besok","total_pengeluaran_harian",
-    "total_pemasukan_harian","rasio_wants",
-]
-
-# ══════════════════════════════════════════════════════════════
-#  PAGE CONFIG
-# ══════════════════════════════════════════════════════════════
 st.set_page_config(
-    page_title="FinPredict AI",
-    page_icon="🧠",
+    page_title="FinPredict Analytics",
+    page_icon="💸",
     layout="wide",
     initial_sidebar_state="expanded",
 )
 
-# ══════════════════════════════════════════════════════════════
-#  DESIGN TOKENS  — mirip referensi gambar
-#  Palette: dark navy header card, mint green accent, coral accent,
-#           clean white chart area, light mint bg
-# ══════════════════════════════════════════════════════════════
-C = {
-    # brand
-    "primary":   "#4F6EF7",   # indigo
-    "secondary": "#7C3AED",   # violet
-    # semantic
-    "success":   "#22C55E",   # mint green  (ref: green accent)
-    "warning":   "#F59E0B",   # amber
-    "danger":    "#EF4444",   # coral-red   (ref: coral accent)
-    "info":      "#3B82F6",
-    # card / ui
-    "card_hdr":  "#1A2035",   # dark navy — KPI card header (ref image)
-    "card_bg":   "#FFFFFF",
-    "surface":   "#FFFFFF",
-    "bg":        "#EBF4F0",   # light mint tint (ref bg)
-    "sidebar":   "#1A2035",   # dark navy sidebar
-    "border":    "#DDE3EC",
-    "text":      "#1A2035",
-    "muted":     "#6B7A99",
-    # chart palette
-    "chart": ["#4F6EF7","#22C55E","#F59E0B","#EF4444","#7C3AED",
-              "#3B82F6","#F97316","#06B6D4","#84CC16","#E11D48"],
+# =============================================================================
+#  1. KONFIGURASI & TOKEN DESAIN
+# =============================================================================
+APP_VERSION = "9.0"
+TEAM_ID = "CC26-PSU290"
+
+PRODUCTION_MODEL = "LSTM"   # model yang diintegrasikan ke aplikasi (Project Brief, bagian O)
+ACCURACY_TARGET = 0.85      # Side Quest Project Brief: akurasi minimal 85%
+HORIZON_DAYS = 30           # horizon proyeksi Early Warning System
+DTR_BAHAYA, DTR_WASPADA = 7, 14   # ambang days_to_ruin (sesuai 02_wrangling_eda.py)
+AB_EFFECT_SIZE = 0.30       # parameter simulasi di 05_ab_testing.py (ubah bila eksperimen diulang)
+PEMICU_OVERSPENDING = ["Harbolnas / Flash Sale", "Doom Spending", "Cafe & Hiburan", "Gaming & Top-up"]
+
+# Warna — gaya neo-brutalism agar senada dengan antarmuka produk FinPredict
+INK, PAPER, CARD = "#0B0B0B", "#F4F3EE", "#FFFFFF"
+MUTED, GRID = "#5B5B55", "#E7E5DE"
+LIME, PURPLE, ORANGE = "#CCFF00", "#A855F7", "#FF8A00"
+GREEN, RED, BLUE, TEAL = "#16A34A", "#EF4444", "#3B82F6", "#0EA5A5"
+YELLOW, GRAY, PINK = "#EAB308", "#6B7280", "#FFC2CF"
+BG_PURPLE, BG_ORANGE, BG_GREEN = "#EBD9FF", "#FFE2BF", "#C9F7D8"
+PALETTE = [PURPLE, ORANGE, GREEN, BLUE, RED, TEAL, YELLOW, GRAY]
+
+SRS_COLORS = {
+    "Makanan": ORANGE, "Transportasi": BLUE, "Hiburan": PURPLE, "Tagihan": RED,
+    "Lain-lain": GRAY, "Tabungan": GREEN, "Pemasukan": TEAL,
+}
+STATUS_COLORS = {"BAHAYA": RED, "WASPADA": ORANGE, "AMAN": GREEN}
+
+FASE_LABEL = {2: "Tgl Muda (1–10)", 1: "Tengah Bulan (11–21)", 0: "Tgl Tua (22–31)"}
+FASE_ORDER = list(FASE_LABEL.values())
+HARI = ["Sen", "Sel", "Rab", "Kam", "Jum", "Sab", "Min"]
+BULAN = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"]
+
+PAGE_LABELS = [
+    "🏠 Ringkasan", "🧹 Data Wrangling", "🔎 Eksplorasi Pengeluaran",
+    "⚠️ Risiko Defisit", "🚨 Early Warning", "🤖 Evaluasi Model",
+    "⚖️ A/B Testing", "📚 Data Dictionary", "📥 Unduh Data",
+]
+
+PLOT_CONFIG = {
+    "displaylogo": False,
+    "modeBarButtonsToRemove": ["lasso2d", "select2d", "autoScale2d"],
 }
 
-CSS = f"""
+# =============================================================================
+#  2. CSS
+# =============================================================================
+_CSS = """
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&display=swap');
+.fp-hero, .fp-kpi, .fp-note, .fp-q, .fp-section, .fp-brand, .fp-step, .fp-status, .fp-badge,
+[data-testid="stMarkdownContainer"] { font-family: 'Space Grotesk', system-ui, -apple-system, 'Segoe UI', sans-serif; }
+.block-container { padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1380px; }
+footer { visibility: hidden; }
+section[data-testid="stSidebar"] { border-right: 3px solid @INK@; }
 
-*, *::before, *::after {{ box-sizing: border-box; }}
-html, body, [class*="css"] {{
-    font-family: 'Inter', system-ui, sans-serif !important;
-    background: {C["bg"]} !important;
-    color: {C["text"]};
-}}
-#MainMenu, footer, header {{ visibility: hidden; }}
-.block-container {{
-    padding: 0 !important;
-    max-width: 100% !important;
-}}
+.fp-brand { background:@LIME@; border:3px solid @INK@; border-radius:14px; padding:12px 14px;
+            box-shadow:4px 4px 0 @INK@; margin-bottom:14px; }
+.fp-brand .t { font-weight:700; font-size:1.25rem; font-style:italic; letter-spacing:-.02em; color:@INK@; }
+.fp-brand .s { font-size:.78rem; color:@INK@; opacity:.8; }
 
-/* ═══════════════════════════════
-   SIDEBAR — dark navy icon sidebar
-   ═══════════════════════════════ */
-[data-testid="stSidebar"] {{
-    background: {C["sidebar"]} !important;
-    border-right: none !important;
-    min-width: 220px !important;
-    max-width: 220px !important;
-}}
-[data-testid="stSidebar"] > div:first-child {{
-    padding: 0 !important;
-}}
-[data-testid="stSidebar"] * {{
-    color: #A8B4CF !important;
-}}
-[data-testid="stSidebar"] .stSelectbox > div > div,
-[data-testid="stSidebar"] .stDateInput > div > div {{
-    background: rgba(255,255,255,0.07) !important;
-    border: 1px solid rgba(255,255,255,0.12) !important;
-    border-radius: 8px !important;
-    color: #E2E8F0 !important;
-    font-size: 13px !important;
-}}
-[data-testid="stSidebar"] .stRadio > div {{
-    gap: 2px !important;
-}}
-[data-testid="stSidebar"] .stRadio label {{
-    display: flex !important;
-    align-items: center !important;
-    gap: 10px !important;
-    padding: 9px 16px !important;
-    border-radius: 8px !important;
-    font-size: 13px !important;
-    font-weight: 500 !important;
-    cursor: pointer !important;
-    transition: all .15s !important;
-    border: none !important;
-}}
-[data-testid="stSidebar"] .stRadio label:hover {{
-    background: rgba(79,110,247,0.15) !important;
-    color: #fff !important;
-}}
-[data-testid="stSidebar"] [aria-checked="true"] + label,
-[data-testid="stSidebar"] .stRadio label[data-checked="true"] {{
-    background: rgba(79,110,247,0.25) !important;
-    color: #818CF8 !important;
-}}
-[data-testid="stSidebar"] .stSlider [data-testid="stSliderThumb"] {{
-    background: {C["primary"]} !important;
-}}
-[data-testid="stSidebar"] hr {{
-    border-color: rgba(255,255,255,0.08) !important;
-}}
+.fp-hero { background:@LIME@; border:3px solid @INK@; border-radius:18px; padding:20px 26px;
+           box-shadow:6px 6px 0 @INK@; margin-bottom:20px; }
+.fp-hero h1 { margin:0; padding:0; font-size:1.9rem; font-weight:700; font-style:italic;
+              text-transform:uppercase; letter-spacing:-.02em; color:@INK@; line-height:1.15; }
+.fp-hero p { margin:6px 0 0 0; color:@INK@; font-size:1rem; }
+.fp-badge { display:inline-block; background:@INK@; color:@LIME@; border-radius:999px; padding:3px 12px;
+            font-size:.72rem; font-weight:600; letter-spacing:.04em; margin-bottom:8px; }
 
-/* ═══════════════════════════════
-   MAIN CONTENT WRAPPER
-   ═══════════════════════════════ */
-.main-wrap {{
-    padding: 1.25rem 1.75rem 2rem;
-}}
+.fp-section { font-size:1.15rem; font-weight:700; color:@INK@; margin:26px 0 8px 0;
+              padding-bottom:4px; border-bottom:3px solid @INK@; display:inline-block; }
 
-/* ═══════════════════════════════
-   TOP NAV BAR  (breadcrumb style)
-   ═══════════════════════════════ */
-.topnav {{
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: .875rem 1.75rem;
-    background: {C["surface"]};
-    border-bottom: 1px solid {C["border"]};
-    margin-bottom: 0;
-}}
-.topnav-left {{
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}}
-.topnav-logo {{
-    width: 32px; height: 32px;
-    background: {C["primary"]};
-    border-radius: 8px;
-    display: flex; align-items: center; justify-content: center;
-    color: #fff; font-weight: 800; font-size: 14px;
-}}
-.topnav-brand {{ font-size: 15px; font-weight: 700; color: {C["text"]}; }}
-.topnav-sep {{ color: {C["border"]}; margin: 0 4px; }}
-.topnav-crumb {{ font-size: 12px; color: {C["muted"]}; }}
-.topnav-right {{
-    display: flex; align-items: center; gap: 12px;
-}}
-.engine-pill {{
-    background: linear-gradient(135deg, {C["primary"]}, {C["secondary"]});
-    color: #fff;
-    font-size: 10px; font-weight: 600;
-    padding: 4px 12px; border-radius: 20px;
-    letter-spacing: .04em;
-}}
+.fp-kpi { border:2px solid @INK@; border-radius:14px; padding:13px 16px; box-shadow:4px 4px 0 @INK@;
+          height:100%; }
+.fp-kpi .lbl { font-size:.7rem; text-transform:uppercase; letter-spacing:.07em; color:@MUTED@; font-weight:600; }
+.fp-kpi .val { font-size:1.65rem; font-weight:700; line-height:1.2; margin-top:3px; color:@INK@; }
+.fp-kpi .note { font-size:.78rem; color:@MUTED@; margin-top:2px; }
 
-/* ═══════════════════════════════
-   KPI CARD  — dark header style (ref image)
-   ═══════════════════════════════ */
-.kpi-card {{
-    background: {C["card_bg"]};
-    border-radius: 12px;
-    overflow: hidden;
-    box-shadow: 0 2px 8px rgba(26,32,53,0.08);
-    transition: transform .18s, box-shadow .18s;
-    height: 100%;
-    border: 1px solid {C["border"]};
-}}
-.kpi-card:hover {{
-    transform: translateY(-3px);
-    box-shadow: 0 8px 24px rgba(26,32,53,0.13);
-}}
-.kpi-hdr {{
-    background: {C["card_hdr"]};
-    padding: .55rem 1rem;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-}}
-.kpi-hdr-lbl {{
-    font-size: 10px;
-    font-weight: 700;
-    color: #A8B4CF;
-    text-transform: uppercase;
-    letter-spacing: .08em;
-}}
-.kpi-hdr-ico {{
-    width: 26px; height: 26px;
-    border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 13px;
-}}
-.kpi-body {{
-    padding: .8rem 1rem .9rem;
-}}
-.kpi-value {{
-    font-size: 26px;
-    font-weight: 700;
-    color: {C["text"]};
-    line-height: 1.1;
-    font-variant-numeric: tabular-nums;
-    letter-spacing: -.02em;
-}}
-.kpi-sub {{
-    font-size: 11px;
-    margin-top: 5px;
-    font-weight: 600;
-    display: flex;
-    align-items: center;
-    gap: 3px;
-}}
+.fp-note { background:@CARD@; border:2px solid @INK@; border-left-width:9px; border-radius:10px;
+           padding:10px 14px; margin:10px 0 16px 0; font-size:.93rem; line-height:1.5; color:@INK@; }
+.fp-note.info { border-left-color:@PURPLE@; } .fp-note.warn { border-left-color:@ORANGE@; }
+.fp-note.good { border-left-color:@GREEN@; }  .fp-note.bad  { border-left-color:@RED@; }
+.fp-note .tag { font-weight:700; text-transform:uppercase; font-size:.72rem; letter-spacing:.07em; display:block; margin-bottom:2px; }
 
-/* ═══════════════════════════════
-   PANEL  — white card with clean header
-   ═══════════════════════════════ */
-.panel {{
-    background: {C["surface"]};
-    border-radius: 12px;
-    border: 1px solid {C["border"]};
-    overflow: hidden;
-    box-shadow: 0 2px 8px rgba(26,32,53,0.05);
-}}
-.panel-hdr {{
-    padding: .75rem 1.1rem;
-    border-bottom: 1px solid {C["border"]};
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: {C["surface"]};
-}}
-.panel-title {{
-    font-size: 13px;
-    font-weight: 600;
-    color: {C["text"]};
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}}
-.panel-sub {{
-    font-size: 11px;
-    color: {C["muted"]};
-    margin-top: 1px;
-}}
-.panel-body {{
-    padding: 1rem 1.1rem;
-}}
+.fp-q { background:@CARD@; border:2px solid @INK@; border-radius:14px; padding:14px 16px;
+        box-shadow:4px 4px 0 @INK@; height:100%; }
+.fp-q .qn { display:inline-block; background:@INK@; color:@LIME@; font-weight:700; border-radius:8px;
+            padding:1px 9px; font-size:.82rem; }
+.fp-q .qt { font-weight:700; font-size:1rem; margin:8px 0 4px 0; color:@INK@; }
+.fp-q .qm { font-size:.76rem; color:@MUTED@; margin-bottom:8px; }
+.fp-q .qa { font-size:.92rem; line-height:1.45; color:@INK@; }
 
-/* ═══════════════════════════════
-   SECTION HEADER
-   ═══════════════════════════════ */
-.sec-title {{
-    font-size: 15px;
-    font-weight: 700;
-    color: {C["text"]};
-    margin-bottom: 2px;
-}}
-.sec-sub {{
-    font-size: 12px;
-    color: {C["muted"]};
-    margin-bottom: 12px;
-}}
+.fp-step { background:@CARD@; border:2px solid @INK@; border-radius:14px; padding:12px 14px;
+           box-shadow:4px 4px 0 @INK@; height:100%; }
+.fp-step .n { font-weight:700; font-size:.8rem; background:@PURPLE@; color:#fff; border-radius:999px;
+              padding:1px 9px; display:inline-block; }
+.fp-step .h { font-weight:700; margin:6px 0 2px 0; color:@INK@; }
+.fp-step .d { font-size:.82rem; color:@MUTED@; line-height:1.4; }
 
-/* ═══════════════════════════════
-   ALERT
-   ═══════════════════════════════ */
-.alert-d {{ background:#FEF2F2; border-left:3px solid {C["danger"]};  padding:.65rem 1rem; border-radius:0 8px 8px 0; color:#991B1B; font-size:13px; margin:.5rem 0; }}
-.alert-w {{ background:#FFFBEB; border-left:3px solid {C["warning"]}; padding:.65rem 1rem; border-radius:0 8px 8px 0; color:#92400E; font-size:13px; margin:.5rem 0; }}
-.alert-s {{ background:#ECFDF5; border-left:3px solid {C["success"]}; padding:.65rem 1rem; border-radius:0 8px 8px 0; color:#065F46; font-size:13px; margin:.5rem 0; }}
-.alert-i {{ background:#EFF6FF; border-left:3px solid {C["info"]};    padding:.65rem 1rem; border-radius:0 8px 8px 0; color:#1E40AF; font-size:13px; margin:.5rem 0; }}
+.fp-status { border:3px solid @INK@; border-radius:14px; padding:14px 18px; box-shadow:5px 5px 0 @INK@;
+             font-size:1rem; color:@INK@; margin-bottom:8px; }
+.fp-status b { font-size:1.35rem; letter-spacing:.02em; }
 
-/* ═══════════════════════════════
-   HEALTH BAR
-   ═══════════════════════════════ */
-.hbar {{ background:{C["border"]}; border-radius:100px; height:6px; overflow:hidden; margin:.3rem 0; }}
-.hfill {{ height:6px; border-radius:100px; transition:width .5s ease; }}
-
-/* ═══════════════════════════════
-   DIVIDER
-   ═══════════════════════════════ */
-hr.div {{ border:none; border-top:1px solid {C["border"]}; margin:1.25rem 0; }}
-
-/* ═══════════════════════════════
-   LSTM BANNER
-   ═══════════════════════════════ */
-.lstm-banner {{
-    background: linear-gradient(135deg,{C["card_hdr"]} 0%,#243060 55%,#312E81 100%);
-    border-radius: 12px;
-    padding: 1.2rem 1.6rem;
-    color: #fff;
-    margin-bottom: 1.25rem;
-    border: 1px solid rgba(255,255,255,0.06);
-}}
-
-/* ═══════════════════════════════
-   TABS
-   ═══════════════════════════════ */
-.stTabs [data-baseweb="tab-list"] {{
-    gap: 4px;
-    background: {C["bg"]};
-    border-radius: 10px;
-    padding: 4px;
-    border: 1px solid {C["border"]};
-}}
-.stTabs [data-baseweb="tab"] {{
-    border-radius: 7px;
-    font-size: 13px;
-    font-weight: 500;
-    padding: 6px 16px;
-}}
-.stTabs [aria-selected="true"] {{
-    background: {C["surface"]};
-    box-shadow: 0 1px 4px rgba(0,0,0,.08);
-}}
-
-/* ═══════════════════════════════
-   INSIGHT CARD
-   ═══════════════════════════════ */
-.insight-card {{
-    background: {C["surface"]};
-    border: 1px solid {C["border"]};
-    border-radius: 10px;
-    padding: .85rem 1rem;
-    margin-bottom: .5rem;
-    display: flex;
-    gap: 10px;
-    align-items: flex-start;
-    transition: box-shadow .15s;
-}}
-.insight-card:hover {{ box-shadow: 0 4px 16px rgba(0,0,0,.07); }}
-.insight-title {{ font-size:13px; font-weight:600; color:{C["text"]}; margin-bottom:3px; }}
-.insight-body  {{ font-size:12px; color:{C["muted"]}; line-height:1.55; }}
-
-/* ═══════════════════════════════
-   STATUS BADGE
-   ═══════════════════════════════ */
-.badge {{
-    display: inline-flex; align-items: center;
-    font-size: 11px; font-weight: 600;
-    padding: 3px 10px; border-radius: 20px;
-    gap: 4px;
-}}
-.badge-s {{ background: rgba(34,197,94,.15);  color: #15803D; }}
-.badge-w {{ background: rgba(245,158,11,.15); color: #92400E; }}
-.badge-d {{ background: rgba(239,68,68,.15);  color: #991B1B; }}
-.badge-i {{ background: rgba(79,110,247,.12); color: #3730A3; }}
-
-/* ═══════════════════════════════
-   STAT ROW  (mini metric inside panel)
-   ═══════════════════════════════ */
-.stat-row {{
-    display: flex; justify-content: space-between;
-    align-items: center; padding: .4rem 0;
-    border-bottom: 1px solid {C["border"]};
-    font-size: 12px;
-}}
-.stat-row:last-child {{ border-bottom: none; }}
-.stat-lbl {{ color: {C["muted"]}; font-weight: 500; }}
-.stat-val {{ font-weight: 600; color: {C["text"]}; }}
+div[data-testid="stPlotlyChart"] { background:@CARD@; border:2px solid @INK@; border-radius:14px;
+    padding:6px; box-shadow:4px 4px 0 @INK@; margin-bottom:10px; }
+div[data-testid="stDataFrame"] { border:2px solid @INK@; border-radius:12px; overflow:hidden; }
+div[data-testid="stExpander"] { border:2px solid @INK@; border-radius:12px; background:@CARD@; }
+.stButton > button, .stDownloadButton > button { border:2px solid @INK@; border-radius:10px;
+    box-shadow:3px 3px 0 @INK@; font-weight:600; color:@INK@; background:@CARD@; }
+.stButton > button:hover, .stDownloadButton > button:hover { background:@LIME@; border-color:@INK@; color:@INK@; }
+button[data-baseweb="tab"] { font-weight:600; }
+button[data-baseweb="tab"][aria-selected="true"] { background:@LIME@; border-radius:8px 8px 0 0; color:@INK@; }
 </style>
 """
-st.markdown(CSS, unsafe_allow_html=True)
+for _k, _v in {"@INK@": INK, "@LIME@": LIME, "@CARD@": CARD, "@MUTED@": MUTED,
+               "@PURPLE@": PURPLE, "@ORANGE@": ORANGE, "@GREEN@": GREEN, "@RED@": RED}.items():
+    _CSS = _CSS.replace(_k, _v)
+st.markdown(_CSS, unsafe_allow_html=True)
 
 
-# ══════════════════════════════════════════════════════════════
-#  FILE FINDER
-# ══════════════════════════════════════════════════════════════
-def _find(filename: str) -> str | None:
-    for p in [filename, f"data/{filename}", f"models/{filename}"]:
-        if os.path.exists(p):
-            return p
-    return None
+# =============================================================================
+#  3. HELPER FORMAT
+# =============================================================================
+def num_id(x: float, d: int = 0) -> str:
+    """Format angka gaya Indonesia: 1.234.567,8"""
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "–"
+    s = f"{x:,.{d}f}"
+    return s.replace(",", "§").replace(".", ",").replace("§", ".")
 
 
-# ══════════════════════════════════════════════════════════════
-#  DATA LOADERS
-# ══════════════════════════════════════════════════════════════
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_daily() -> tuple[pd.DataFrame, list]:
-    path = _find("daily_features_v8.csv")
-    if not path:
-        return pd.DataFrame(), ["daily_features_v8.csv tidak ditemukan."]
-    df = pd.read_csv(path, parse_dates=["tanggal_transaksi"])
-    missing = [c for c in REQUIRED_COLS if c not in df.columns]
-    if missing:
-        return pd.DataFrame(), [f"Kolom wajib tidak ada: {missing}"]
-    return df, []
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_transactions() -> pd.DataFrame:
-    path = _find("transactions_clean_v8.csv")
-    return pd.read_csv(path, parse_dates=["tanggal_transaksi"]) if path else pd.DataFrame()
-
-@st.cache_data(ttl=3600, show_spinner=False)
-def load_optional(fname: str) -> pd.DataFrame:
-    path = _find(fname)
-    return pd.read_csv(path) if path else pd.DataFrame()
-
-@st.cache_resource(show_spinner=False)
-def load_model() -> tuple:
-    path = _find("model_lstm.h5")
-    if not path:
-        return None, False, "model_lstm.h5 tidak ditemukan"
-    try:
-        import tensorflow as tf
-        tf.get_logger().setLevel("ERROR")
-        m = tf.keras.models.load_model(path, compile=False)
-        return m, True, f"TensorFlow {tf.__version__}"
-    except Exception as e:
-        return None, False, str(e)
-
-@st.cache_resource(show_spinner=False)
-def load_scalers() -> tuple:
-    path = _find("scalers_v8.pkl")
-    if not path:
-        return {}, False
-    try:
-        with open(path, "rb") as f:
-            return pickle.load(f), True
-    except Exception:
-        return {}, False
+def rp(x: float) -> str:
+    """Rupiah ringkas: Rp 7,25 M · Rp 1,2 jt · Rp 930 rb."""
+    if x is None or (isinstance(x, float) and np.isnan(x)):
+        return "–"
+    sign, a = ("-" if x < 0 else ""), abs(float(x))
+    if a >= 1e12:
+        return f"{sign}Rp {num_id(a / 1e12, 2)} T"
+    if a >= 1e9:
+        return f"{sign}Rp {num_id(a / 1e9, 2)} M"
+    if a >= 1e6:
+        return f"{sign}Rp {num_id(a / 1e6, 1)} jt"
+    if a >= 1e3:
+        return f"{sign}Rp {num_id(a / 1e3, 0)} rb"
+    return f"{sign}Rp {num_id(a, 0)}"
 
 
-# ══════════════════════════════════════════════════════════════
-#  HELPERS
-# ══════════════════════════════════════════════════════════════
-def fmt_rp(n: float) -> str:
-    if abs(n) >= 1_000_000_000: return f"Rp {n/1e9:.1f}M"
-    if abs(n) >= 1_000_000:     return f"Rp {n/1e6:.1f}Jt"
-    if abs(n) >= 1_000:         return f"Rp {n/1e3:.0f}K"
-    return f"Rp {n:.0f}"
+def rp_full(x: float) -> str:
+    return f"{'-' if x < 0 else ''}Rp {num_id(abs(x), 0)}"
 
 
-def kpi_card(label: str, value: str, sub: str = "", sub_color: str = "",
-             icon: str = "💰", icon_bg: str = "") -> str:
-    """KPI card with dark header (ref image style)."""
-    ibg  = icon_bg or C["primary"]
-    sclr = sub_color or C["muted"]
-    sub_h = f'<div class="kpi-sub" style="color:{sclr}">{sub}</div>' if sub else ""
-    return f"""
-    <div class="kpi-card">
-      <div class="kpi-hdr">
-        <span class="kpi-hdr-lbl">{label}</span>
-        <span class="kpi-hdr-ico" style="background:{ibg}20;color:{ibg}">{icon}</span>
-      </div>
-      <div class="kpi-body">
-        <div class="kpi-value">{value}</div>
-        {sub_h}
-      </div>
-    </div>"""
+def pct(x: float, d: int = 1) -> str:
+    return "–" if x is None or pd.isna(x) else f"{num_id(x * 100, d)}%"
 
 
-def panel_open(title: str, sub: str = "", right_html: str = "") -> str:
-    sub_h = f'<div class="panel-sub">{sub}</div>' if sub else ""
-    right = f'<div>{right_html}</div>' if right_html else ""
-    return f"""<div class="panel">
-  <div class="panel-hdr">
-    <div><div class="panel-title">{title}</div>{sub_h}</div>
-    {right}
-  </div>
-  <div class="panel-body">"""
-
-def panel_close() -> str:
-    return "</div></div>"
+def pp(x: float, d: int = 1) -> str:
+    """Selisih dalam poin persentase."""
+    return f"{num_id(abs(x) * 100, d)} poin"
 
 
-def section(title: str, sub: str = "") -> None:
-    st.markdown(f'<div class="sec-title">{title}</div>', unsafe_allow_html=True)
-    if sub:
-        st.markdown(f'<div class="sec-sub">{sub}</div>', unsafe_allow_html=True)
+def month_labels(series: pd.Series) -> list[str]:
+    return [f"{BULAN[m - 1]} {y}" for m, y in zip(series.dt.month, series.dt.year)]
 
 
-def alert(text: str, kind: str = "w") -> str:
-    cls = {"d":"alert-d","w":"alert-w","s":"alert-s","i":"alert-i"}.get(kind,"alert-w")
-    return f'<div class="{cls}">{text}</div>'
+def tidy(df: pd.DataFrame) -> pd.DataFrame:
+    """Ubah kolom kategorikal → string agar Plotly tidak membuat grup kosong."""
+    out = df.copy()
+    for c in out.columns:
+        if isinstance(out[c].dtype, pd.CategoricalDtype):
+            out[c] = out[c].astype(str)
+    return out
 
 
-def badge(text: str, kind: str = "i") -> str:
-    cls = {"s":"badge-s","w":"badge-w","d":"badge-d","i":"badge-i"}.get(kind,"badge-i")
-    return f'<span class="badge {cls}">{text}</span>'
+def vcounts(s: pd.Series) -> pd.Series:
+    """value_counts tanpa kategori yang tidak muncul."""
+    vc = s.value_counts()
+    return vc[vc > 0]
 
 
-def fig_style(fig: go.Figure, h: int = 340) -> go.Figure:
-    """Apply clean chart style matching the reference image."""
-    fig.update_layout(
-        height=h,
-        margin=dict(l=6, r=6, t=36, b=6),
-        paper_bgcolor=C["surface"],
-        plot_bgcolor=C["surface"],
-        font=dict(family="Inter", size=11, color=C["text"]),
-        legend=dict(
-            bgcolor=C["surface"], bordercolor=C["border"], borderwidth=1,
-            orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1,
-            font=dict(size=11),
-        ),
-        xaxis=dict(
-            showgrid=True, gridcolor="#F0F4F8", gridwidth=1,
-            zeroline=False, linecolor=C["border"],
-            tickfont=dict(size=10, color=C["muted"]),
-        ),
-        yaxis=dict(
-            showgrid=True, gridcolor="#F0F4F8", gridwidth=1,
-            zeroline=False, linecolor=C["border"],
-            tickfont=dict(size=10, color=C["muted"]),
-        ),
+# =============================================================================
+#  4. KOMPONEN UI
+# =============================================================================
+def esc(x) -> str:
+    return html.escape(str(x))
+
+
+def b(x) -> str:
+    return f"<b>{esc(x)}</b>"
+
+
+def hero(title: str, subtitle: str, badge: str | None = None) -> None:
+    badge_html = f'<span class="fp-badge">{esc(badge)}</span><br>' if badge else ""
+    st.markdown(
+        f'<div class="fp-hero">{badge_html}<h1>{esc(title)}</h1><p>{esc(subtitle)}</p></div>',
+        unsafe_allow_html=True,
     )
+
+
+def section(title: str, caption: str | None = None) -> None:
+    st.markdown(f'<div class="fp-section">{esc(title)}</div>', unsafe_allow_html=True)
+    if caption:
+        st.caption(caption)
+
+
+def kpi_html(label: str, value: str, note: str = "", bg: str = CARD) -> str:
+    return (f'<div class="fp-kpi" style="background:{bg}"><div class="lbl">{esc(label)}</div>'
+            f'<div class="val">{esc(value)}</div><div class="note">{esc(note)}</div></div>')
+
+
+def kpi_row(items: list[tuple]) -> None:
+    cols = st.columns(len(items))
+    for col, it in zip(cols, items):
+        with col:
+            st.markdown(kpi_html(*it), unsafe_allow_html=True)
+
+
+def callout(body_html: str, kind: str = "info", title: str | None = None) -> None:
+    """Kotak insight. body_html harus HTML tepercaya (nilai dinamis di-escape pemanggil)."""
+    tags = {"info": "Insight", "warn": "Perhatian", "good": "Temuan positif", "bad": "Risiko"}
+    st.markdown(
+        f'<div class="fp-note {kind}"><span class="tag">{esc(title or tags.get(kind, "Insight"))}</span>{body_html}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def _supports_new_width() -> bool:
+    m = re.match(r"(\d+)\.(\d+)", getattr(st, "__version__", "0.0"))
+    return bool(m) and (int(m.group(1)), int(m.group(2))) >= (1, 50)
+
+
+_NEW_WIDTH_API = _supports_new_width()
+
+
+def call_stretch(fn, *args, **kwargs):
+    """Panggil komponen Streamlit selebar kolom, kompatibel lintas versi
+    (width='stretch' pada versi baru, use_container_width=True pada versi lama)."""
+    options = [{"width": "stretch"}, {"use_container_width": True}]
+    if not _NEW_WIDTH_API:
+        options.reverse()
+    for extra in options + [{}]:
+        try:
+            return fn(*args, **kwargs, **extra)
+        except TypeError:
+            continue
+    return fn(*args, **kwargs)
+
+
+def style_fig(fig: go.Figure, height: int = 380, title: str | None = None) -> go.Figure:
+    layout = dict(
+        template="plotly_white", height=height, paper_bgcolor=CARD, plot_bgcolor=CARD,
+        font=dict(family="Space Grotesk, system-ui, sans-serif", size=13, color=INK),
+        colorway=PALETTE, separators=",.", legend_title_text="",
+        margin=dict(l=14, r=14, t=56 if title else 26, b=14),
+    )
+    if title:
+        layout["title"] = dict(text=title, x=0.01, xanchor="left", font=dict(size=15, color=INK))
+    fig.update_layout(**layout)
+    fig.update_xaxes(linecolor=INK, gridcolor=GRID, zeroline=False)
+    fig.update_yaxes(linecolor=INK, gridcolor=GRID, zeroline=False)
     return fig
 
 
-def health_score(df: pd.DataFrame) -> tuple:
-    score = 100.0
-    if "label_defisit_besok" in df.columns:
-        dr = df["label_defisit_besok"].mean()
-        if not np.isnan(dr): score -= min(40, dr * 80)
-    if "rasio_wants" in df.columns:
-        rw = df["rasio_wants"].mean()
-        if not np.isnan(rw): score -= min(20, max(0,(rw-.4)*60))
-    if "days_to_ruin" in df.columns:
-        dtr = df[df["days_to_ruin"]<DTR_SENTINEL]["days_to_ruin"].median()
-        if not np.isnan(dtr):
-            score -= 25 if dtr<DTR_CRITICAL else 12 if dtr<DTR_WARNING else 4 if dtr<30 else 0
-    s = max(0, min(100, int(score)))
-    if s >= 80: return s, "Excellent", C["success"]
-    if s >= 60: return s, "Good",      C["info"]
-    if s >= 40: return s, "Warning",   C["warning"]
-    return s, "Danger", C["danger"]
+def show(fig: go.Figure, height: int = 380, title: str | None = None) -> None:
+    style_fig(fig, height, title)
+    st.plotly_chart(fig, theme=None, config=PLOT_CONFIG)
 
 
-def filter_df(df: pd.DataFrame, f: dict) -> pd.DataFrame:
-    if df.empty: return df
-    if f["user"] != "All Users" and "user_id" in df.columns:
-        df = df[df["user_id"] == f["user"]]
-    if f["tipe"] != "All Types" and "tipe_user" in df.columns:
-        df = df[df["tipe_user"] == f["tipe"]]
-    if "tanggal_transaksi" in df.columns and len(f["dates"]) == 2:
-        d0, d1 = pd.Timestamp(f["dates"][0]), pd.Timestamp(f["dates"][1])
-        df = df[(df["tanggal_transaksi"] >= d0) & (df["tanggal_transaksi"] <= d1)]
-    return df.copy()
+def show_df(df: pd.DataFrame, height: int | None = None, **kw) -> None:
+    extra = {"hide_index": True, **kw}
+    if height:
+        extra["height"] = height
+    call_stretch(st.dataframe, df, **extra)
 
 
-# ══════════════════════════════════════════════════════════════
-#  LSTM ENGINE  (identical to v10 — no changes)
-# ══════════════════════════════════════════════════════════════
-def _scale_features(uid, X_raw, scalers):
-    if uid in scalers:
-        sc = scalers[uid]
-    elif scalers:
-        sc = next(iter(scalers.values()))
-        st.warning(f"Scaler `{uid}` tidak ditemukan, pakai fallback.")
-    else:
-        return X_raw, None
-    n = sc.n_features_in_
-    if X_raw.shape[1] < n:
-        X_raw = np.hstack([X_raw, np.zeros((X_raw.shape[0], n-X_raw.shape[1]))])
-    return sc.transform(X_raw[:, :n]), sc
+# =============================================================================
+#  5. AKSES DATA
+# =============================================================================
+ROOT = Path(__file__).resolve().parent
+
+# kunci → (nama file, folder pada struktur repo)
+FILE_SPECS = {
+    "transactions": ("transactions_clean_v8.csv", "02_Clean_Data"),
+    "daily":        ("daily_features_v8.csv", "02_Clean_Data"),
+    "scaled":       ("scaled_full_v8.csv", "02_Clean_Data"),
+    "raw":          ("raw_dirty_v8.csv", "01_Raw_Data"),
+    "categories":   ("category_mapping_v8.csv", "03_Category_Mapping"),
+    "split":        ("split_info_v8.csv", "04_Split_Info"),
+    "model":        ("model_xgb.json", "05_Models"),
+    "dictionary":   ("data_dictionary_v8.csv", "Data_Dictionary"),
+    "model_results": ("model_results.csv", "07_Evaluation_Results"),
+    "ab_results":   ("ab_testing_results.csv", "07_Evaluation_Results"),
+}
+
+# Hasil assessing raw_dirty_v8.csv (dipakai bila file mentah tidak ikut di-deploy)
+RAW_SNAPSHOT = {"rows": 253525, "dup_id": 3747, "tgl_slash": 12766, "nominal_rp": 12473,
+                "kategori_nan": 5026, "desk_upper": 3634, "desk_lower": 3684,
+                "source": "snapshot hasil assessing"}
 
 
-def _build_seq(X_scaled):
-    n, nf = X_scaled.shape
-    if n < SEQ_LEN:
-        seq = np.vstack([np.zeros((SEQ_LEN-n, nf)), X_scaled])
-    else:
-        seq = X_scaled[-SEQ_LEN:]
-    seq = seq.astype(np.float32)
-    if seq.shape[1] < N_FEATURES:
-        seq = np.hstack([seq, np.zeros((SEQ_LEN, N_FEATURES-seq.shape[1]))])
-    else:
-        seq = seq[:, :N_FEATURES]
-    return seq.reshape(1, SEQ_LEN, N_FEATURES)
+def find_file(key: str) -> Path | None:
+    name, folder = FILE_SPECS[key]
+    for base in dict.fromkeys([ROOT, Path.cwd()]):
+        for sub in ("", folder, "data", "dashboard_data"):
+            p = base / sub / name
+            if p.is_file():
+                return p
+    return None
 
 
-def predict_user(uid, df_daily, model, scalers):
-    try:
-        df_u = df_daily[df_daily["user_id"]==uid].sort_values("tanggal_transaksi").reset_index(drop=True)
-        if df_u.empty: return {"error": f"Tidak ada data {uid}"}
-        missing = [c for c in FEATURE_COLS if c not in df_u.columns]
-        if missing: return {"error": f"Kolom hilang: {missing[:3]}"}
-        X_raw = df_u[FEATURE_COLS].fillna(0).values.astype(np.float32)
-        X_sc, _ = _scale_features(uid, X_raw, scalers)
-        prob = float(np.clip(model.predict(_build_seq(X_sc), verbose=0).flatten()[0], 0, 1))
-        status = "BAHAYA" if prob>=THRESH_HIGH else "WASPADA" if prob>=THRESH_LOW else "AMAN"
-        return {"probability":prob,"prediction":int(prob>=.5),"status":status,"error":None}
-    except Exception as e:
-        return {"error":str(e),"probability":None}
+@st.cache_resource(show_spinner="Memuat data transaksi…")
+def load_transactions(path: str) -> pd.DataFrame:
+    """Read-only (cache_resource tidak menyalin objek) — jangan dimodifikasi."""
+    cats = ["user_id", "tipe_user", "tipe_transaksi", "kategori", "kategori_srs",
+            "metode_pembayaran", "needs_wants"]
+    df = pd.read_csv(path, parse_dates=["tanggal_transaksi"], dtype={c: "category" for c in cats})
+    df["deskripsi"] = df["deskripsi"].astype("category")
+    df["hari_bulan"] = df["tanggal_transaksi"].dt.day.astype("int8")
+    df["hari_minggu"] = df["tanggal_transaksi"].dt.dayofweek.astype("int8")
+    df["bulan"] = df["tanggal_transaksi"].dt.to_period("M").dt.to_timestamp()
+    return df
 
 
-def forecast_30_days(uid, df_daily, model, scalers):
-    try:
-        df_u = df_daily[df_daily["user_id"]==uid].sort_values("tanggal_transaksi").reset_index(drop=True)
-        if df_u.empty or len(df_u)<7: return {"error":"Data historis tidak cukup"}
-        missing = [c for c in FEATURE_COLS if c not in df_u.columns]
-        if missing: return {"error":f"Kolom hilang: {missing[:3]}"}
-        X_raw = df_u[FEATURE_COLS].fillna(0).values.astype(np.float32)
-        X_sc, scaler = _scale_features(uid, X_raw, scalers)
-        if X_sc.shape[0] < SEQ_LEN:
-            X_sc = np.vstack([np.zeros((SEQ_LEN-X_sc.shape[0], X_sc.shape[1])), X_sc])
-        cur = X_sc[-SEQ_LEN:].astype(np.float32)
-        saldo   = float(df_u["saldo_berjalan"].iloc[-1])
-        last_dt = df_u["tanggal_transaksi"].iloc[-1]
-        rec     = df_u.tail(60)
-        avg_inc = float(rec["total_pemasukan_harian"].mean())
-        avg_w   = float(rec["total_wants_harian"].mean())
-        avg_n   = float((rec["total_pengeluaran_harian"]-rec["total_wants_harian"]).clip(lower=0).mean())
-        try:
-            si = FEATURE_COLS.index("saldo_berjalan")
-            si_ok = scaler is not None and si < scaler.n_features_in_
-        except ValueError:
-            si_ok = False
-        probs, balances, dates = [], [], []
-        for i in range(30):
-            prob = float(np.clip(model.predict(_build_seq(cur), verbose=0).flatten()[0], 0, 1))
-            probs.append(prob)
-            saldo += avg_inc - (prob*avg_w + (1-prob)*avg_n)
-            balances.append(saldo)
-            dates.append(last_dt + timedelta(days=i+1))
-            nr = cur[-1].copy()
-            if si_ok:
-                d2 = X_raw[-1:].copy(); d2[0,si] = saldo
-                nr[si] = scaler.transform(d2[:,:scaler.n_features_in_])[0,si]
-            cur = np.vstack([cur[1:], nr])
-        return {"dates":dates,"probs":probs,"balances":balances,
-                "n_deficit_days":sum(1 for b in balances if b<0),"error":None}
-    except Exception as e:
-        return {"error":str(e)}
+@st.cache_resource(show_spinner="Memuat fitur harian…")
+def load_daily(path: str) -> pd.DataFrame:
+    """Read-only — jangan dimodifikasi."""
+    df = pd.read_csv(path, parse_dates=["tanggal_transaksi"],
+                     dtype={"user_id": "category", "tipe_user": "category"})
+    df["fase"] = pd.Categorical(df["fase_bulan_encoded"].map(FASE_LABEL), categories=FASE_ORDER, ordered=True)
+    df["bulan_ts"] = df["tanggal_transaksi"].dt.to_period("M").dt.to_timestamp()
+    return df
 
 
-def heuristic_predict(df_u):
-    dtr = float(df_u["days_to_ruin"].iloc[-1]) if "days_to_ruin" in df_u.columns else 30
-    rw  = float(df_u["rasio_wants"].iloc[-1])   if "rasio_wants"  in df_u.columns else .5
-    bal = float(df_u["saldo_berjalan"].iloc[-1])
-    if bal<=0 or dtr<=0: p=.88
-    elif dtr<DTR_CRITICAL: p=.72
-    elif dtr<DTR_WARNING:  p=.52
-    else: p=float(np.clip(.28+rw*.2,0,1))
-    status = "BAHAYA" if p>=THRESH_HIGH else "WASPADA" if p>=THRESH_LOW else "AMAN"
-    return {"probability":p,"prediction":int(p>=.5),"status":status,"error":None,"heuristic":True}
+@st.cache_data(show_spinner=False)
+def load_csv(path: str) -> pd.DataFrame:
+    return pd.read_csv(path)
 
 
-# ══════════════════════════════════════════════════════════════
-#  SIDEBAR
-# ══════════════════════════════════════════════════════════════
-def render_sidebar(df_daily: pd.DataFrame) -> dict:
-    with st.sidebar:
-        # Logo area
-        st.markdown(f"""
-        <div style="padding:1.25rem 1rem 1rem;border-bottom:1px solid rgba(255,255,255,.08)">
-          <div style="display:flex;align-items:center;gap:10px">
-            <div style="width:36px;height:36px;background:{C['primary']};border-radius:10px;
-                        display:flex;align-items:center;justify-content:center;
-                        font-size:18px;flex-shrink:0">🧠</div>
-            <div>
-              <div style="font-size:14px;font-weight:700;color:#fff;line-height:1.2">FinPredict</div>
-              <div style="font-size:10px;color:#64748B">AI Platform v11</div>
-            </div>
-          </div>
-        </div>""", unsafe_allow_html=True)
-
-        # Nav
-        st.markdown('<div style="padding:.75rem .5rem .25rem;font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.07em">Menu</div>', unsafe_allow_html=True)
-        page = st.radio("nav", [
-            "🏠  Executive Summary",
-            "📊  Spending Overview",
-            "🧠  LSTM Prediction",
-            "⚡  Risk & Early Warning",
-            "📈  Behavior Analysis",
-            "🔍  Category Deep Dive",
-            "⚖️  A/B Testing",
-            "📋  Data & Dokumentasi",
-        ], label_visibility="collapsed")
-
-        st.divider()
-
-        # Filters
-        st.markdown('<div style="padding:0 .25rem .25rem;font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.07em">Filter Global</div>', unsafe_allow_html=True)
-
-        users = ["All Users"]
-        tipes = ["All Types"]
-        min_d = max_d = datetime.now().date()
-        if not df_daily.empty:
-            users += sorted(df_daily["user_id"].unique().tolist())
-            if "tipe_user" in df_daily.columns:
-                tipes += sorted(df_daily["tipe_user"].dropna().unique().tolist())
-            min_d = df_daily["tanggal_transaksi"].min().date()
-            max_d = df_daily["tanggal_transaksi"].max().date()
-
-        sel_user = st.selectbox("👤 User", users)
-        sel_tipe = st.selectbox("🏷️ Tipe User", tipes)
-        dr = st.date_input("📅 Periode",
-                           (max_d - timedelta(days=89), max_d),
-                           min_value=min_d, max_value=max_d)
-
-        # Interactive sliders
-        st.markdown('<div style="margin-top:.75rem;font-size:10px;font-weight:600;color:#475569;text-transform:uppercase;letter-spacing:.07em">Threshold</div>', unsafe_allow_html=True)
-
-        if not df_daily.empty and "total_pengeluaran_harian" in df_daily.columns:
-            avg_sp = float(df_daily["total_pengeluaran_harian"].mean())
-            max_sp = float(df_daily["total_pengeluaran_harian"].quantile(.95))
-        else:
-            avg_sp, max_sp = 200_000, 500_000
-
-        st.markdown('<div style="font-size:11px;color:#64748B;margin-top:6px;margin-bottom:2px">💸 Limit Harian</div>', unsafe_allow_html=True)
-        spend_limit = st.slider("sl", min_value=50_000, max_value=int(max_sp),
-                                value=int(avg_sp), step=10_000,
-                                label_visibility="collapsed", format="Rp %d")
-
-        st.markdown('<div style="font-size:11px;color:#64748B;margin-top:4px;margin-bottom:2px">🎯 Risk Threshold</div>', unsafe_allow_html=True)
-        risk_thresh = st.slider("rt", min_value=10, max_value=90, value=55, step=5,
-                                label_visibility="collapsed", format="%d%%")
-
-        st.divider()
-        st.markdown(f'<div style="font-size:10px;color:#475569;text-align:center;line-height:1.8">FinPredict v11.0 · Dicoding × DBS<br><span style="color:#818CF8">LSTM Engine · Bug-Free</span></div>', unsafe_allow_html=True)
-
+@st.cache_data(show_spinner="Menilai kualitas data mentah…")
+def assess_raw(path: str) -> dict:
+    raw = pd.read_csv(path, dtype=str,
+                      usecols=["transaction_id", "tanggal_transaksi", "kategori", "deskripsi", "nominal"])
+    desc = raw["deskripsi"].dropna()
     return {
-        "page":        page,
-        "user":        sel_user,
-        "tipe":        sel_tipe,
-        "dates":       dr,
-        "spend_limit": spend_limit,
-        "risk_thresh": risk_thresh / 100,
+        "rows": int(len(raw)),
+        "dup_id": int(raw["transaction_id"].duplicated().sum()),
+        "tgl_slash": int(raw["tanggal_transaksi"].str.contains("/", na=False).sum()),
+        "nominal_rp": int(raw["nominal"].str.contains("Rp", na=False).sum()),
+        "kategori_nan": int(raw["kategori"].isna().sum()),
+        "desk_upper": int((desc == desc.str.upper()).sum()),
+        "desk_lower": int((desc == desc.str.lower()).sum()),
+        "source": "dihitung langsung dari raw_dirty_v8.csv",
     }
 
 
-# ══════════════════════════════════════════════════════════════
-#  SHARED: TOP NAV BAR
-# ══════════════════════════════════════════════════════════════
-def topnav(page_name: str, model_ok: bool) -> None:
-    eng = f'<span class="engine-pill">{"✅ LSTM ACTIVE" if model_ok else "⚡ HEURISTIC"}</span>'
-    st.markdown(f"""
-    <div class="topnav">
-      <div class="topnav-left">
-        <div class="topnav-logo">F</div>
-        <span class="topnav-brand">FinPredict AI</span>
-        <span class="topnav-sep">›</span>
-        <span class="topnav-crumb">{page_name}</span>
-      </div>
-      <div class="topnav-right">{eng}</div>
-    </div>
-    <div class="main-wrap">""", unsafe_allow_html=True)
-
-
-def close_wrap() -> None:
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-# ══════════════════════════════════════════════════════════════
-#  PAGE 1: EXECUTIVE SUMMARY
-# ══════════════════════════════════════════════════════════════
-def page_executive(df_daily, df_trx, filters, model, scalers, model_ok):
-    topnav("Executive Summary", model_ok)
-
-    df_d = filter_df(df_daily, filters)
-    df_t = filter_df(df_trx, filters) if not df_trx.empty else pd.DataFrame()
-    df_exp = df_t[df_t["tipe_transaksi"]=="Pengeluaran"] if not df_t.empty and "tipe_transaksi" in df_t.columns else pd.DataFrame()
-    df_inc = df_t[df_t["tipe_transaksi"]=="Pemasukan"]  if not df_t.empty and "tipe_transaksi" in df_t.columns else pd.DataFrame()
-
-    tot_exp  = float(df_exp["nominal"].sum()) if not df_exp.empty else 0.0
-    tot_inc  = float(df_inc["nominal"].sum()) if not df_inc.empty else 0.0
-    net_cf   = tot_inc - tot_exp
-    sav_rate = max(0., (tot_inc-tot_exp)/max(tot_inc,1))
-    deficit  = float(np.nan_to_num(df_d["label_defisit_besok"].mean())) if not df_d.empty else 0.
-    avg_day  = float(np.nan_to_num(df_d["total_pengeluaran_harian"].mean())) if not df_d.empty else 0.
-    rw_avg   = float(np.nan_to_num(df_d["rasio_wants"].mean())) if not df_d.empty else 0.
-    limit    = filters["spend_limit"]
-
-    half    = len(df_d)//2
-    prev_sp = float(df_d.iloc[:half]["total_pengeluaran_harian"].mean()) if half>0 else avg_day
-    curr_sp = float(df_d.iloc[half:]["total_pengeluaran_harian"].mean()) if half>0 else avg_day
-    d_pct   = (curr_sp-prev_sp)/max(abs(prev_sp),1)
-    hs, hl, hc = health_score(df_d) if not df_d.empty else (50,"Warning",C["warning"])
-
-    # ── KPI row 1 ──
-    st.markdown(f'<div style="font-size:13px;font-weight:600;color:{C["muted"]};margin-bottom:10px">'
-                f'Data: {len(df_d):,} hari · {df_d["user_id"].nunique() if not df_d.empty else 0} users</div>',
-                unsafe_allow_html=True)
-
-    k = st.columns(4, gap="small")
-    over = avg_day > limit
-    with k[0]:
-        st.markdown(kpi_card(
-            "TOTAL SPENDING", fmt_rp(tot_exp),
-            f"{'↑' if d_pct>=0 else '↓'} {abs(d_pct):.1%} vs periode lalu",
-            C["danger"] if d_pct>0 else C["success"], "💸",
-            icon_bg=C["danger"]), unsafe_allow_html=True)
-    with k[1]:
-        st.markdown(kpi_card(
-            "TOTAL PEMASUKAN", fmt_rp(tot_inc),
-            "Pemasukan periode ini", C["muted"], "💰",
-            icon_bg=C["success"]), unsafe_allow_html=True)
-    with k[2]:
-        st.markdown(kpi_card(
-            "NET CASHFLOW", fmt_rp(abs(net_cf)),
-            "✅ Surplus" if net_cf>=0 else "❌ Defisit",
-            C["success"] if net_cf>=0 else C["danger"], "⚡",
-            icon_bg=C["primary"]), unsafe_allow_html=True)
-    with k[3]:
-        st.markdown(kpi_card(
-            "HEALTH SCORE", f"{hs}/100", hl, hc, "❤️",
-            icon_bg=hc), unsafe_allow_html=True)
-
-    st.markdown("<div style='height:.75rem'></div>", unsafe_allow_html=True)
-
-    k2 = st.columns(4, gap="small")
-    with k2[0]:
-        st.markdown(kpi_card(
-            "AVG DAILY SPEND", fmt_rp(avg_day),
-            f"{'🔴 Di atas' if over else '🟢 Dalam'} limit {fmt_rp(limit)}",
-            C["danger"] if over else C["success"], "📊",
-            icon_bg=C["info"]), unsafe_allow_html=True)
-    with k2[1]:
-        st.markdown(kpi_card(
-            "WANTS RATIO", f"{rw_avg:.1%}",
-            "🔴 Tinggi" if rw_avg>WANTS_ALERT else "🟢 Sehat",
-            C["danger"] if rw_avg>WANTS_ALERT else C["success"], "🎯",
-            icon_bg=C["warning"]), unsafe_allow_html=True)
-    with k2[2]:
-        high_risk = deficit > filters["risk_thresh"]
-        st.markdown(kpi_card(
-            "DEFICIT RISK", f"{deficit:.1%}",
-            f"{'⚠️ Melebihi' if high_risk else '✅ Di bawah'} threshold {filters['risk_thresh']:.0%}",
-            C["danger"] if high_risk else C["success"], "🚨",
-            icon_bg=C["danger"]), unsafe_allow_html=True)
-    with k2[3]:
-        st.markdown(kpi_card(
-            "SAVINGS RATE", f"{sav_rate:.1%}",
-            "✅ On Track" if sav_rate>SAVINGS_TARGET else "⚠️ Di Bawah Target",
-            C["success"] if sav_rate>SAVINGS_TARGET else C["warning"], "🏦",
-            icon_bg=C["success"]), unsafe_allow_html=True)
-
-    st.markdown("<hr class='div'>", unsafe_allow_html=True)
-
-    # ── Charts row ──
-    cl, cr = st.columns([1.65, 1], gap="medium")
-    with cl:
-        section("📈 Tren Pengeluaran Harian",
-                "Moving average · deficit risk overlay · spending limit")
-        if not df_d.empty:
-            tren = (df_d.groupby("tanggal_transaksi")
-                        .agg(sp=("total_pengeluaran_harian","mean"),
-                             dr=("label_defisit_besok","mean"))
-                        .reset_index())
-            tren["r7"]  = tren["sp"].rolling(7,  min_periods=1).mean()
-            tren["r30"] = tren["sp"].rolling(30, min_periods=1).mean()
-
-            fig = make_subplots(specs=[[{"secondary_y":True}]])
-            # Area fill
-            fig.add_trace(go.Scatter(
-                x=tren["tanggal_transaksi"], y=tren["sp"],
-                fill="tozeroy", fillcolor="rgba(79,110,247,.05)",
-                line=dict(width=0), showlegend=False, name="Harian"),
-                secondary_y=False)
-            # MA lines
-            fig.add_trace(go.Scatter(
-                x=tren["tanggal_transaksi"], y=tren["r7"],
-                line=dict(color=C["primary"], width=2.5), name="MA 7d"),
-                secondary_y=False)
-            fig.add_trace(go.Scatter(
-                x=tren["tanggal_transaksi"], y=tren["r30"],
-                line=dict(color=C["warning"], width=2, dash="dash"), name="MA 30d"),
-                secondary_y=False)
-            # Spending limit — interactive
-            fig.add_hline(y=limit, line_dash="dot", line_color=C["danger"],
-                          line_width=1.5,
-                          annotation_text=f"Limit {fmt_rp(limit)}",
-                          annotation_position="right",
-                          secondary_y=False)
-            # Risk bars
-            fig.add_trace(go.Bar(
-                x=tren["tanggal_transaksi"], y=tren["dr"]*100,
-                marker_color=C["danger"], opacity=0.14, name="Risk %"),
-                secondary_y=True)
-            # Risk threshold
-            fig.add_hline(y=filters["risk_thresh"]*100,
-                          line_dash="dash", line_color=C["warning"], line_width=1,
-                          annotation_text=f"Threshold {filters['risk_thresh']:.0%}",
-                          secondary_y=True)
-            fig.update_yaxes(title_text="Pengeluaran (Rp)", tickformat=",.0f", secondary_y=False)
-            fig.update_yaxes(title_text="Risiko %", ticksuffix="%",
-                             range=[0,200], showgrid=False, secondary_y=True)
-            fig_style(fig, 360)
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Tidak ada data untuk filter yang dipilih.")
-
-    with cr:
-        section("🏥 Financial Health", f"Skor: {hs}/100 · {hl}")
-
-        # Gauge
-        fig_g = go.Figure(go.Indicator(
-            mode="gauge+number",
-            value=hs,
-            number={"font":{"size":34,"family":"Inter","color":hc},"suffix":"/100"},
-            gauge={
-                "axis":{"range":[0,100],"tickfont":{"size":9,"color":C["muted"]},
-                        "tickcolor":C["border"]},
-                "bar": {"color":hc,"thickness":0.26},
-                "bgcolor":C["bg"],
-                "borderwidth":0,
-                "steps":[
-                    {"range":[0,40],  "color":"#FEF2F2"},
-                    {"range":[40,60], "color":"#FFFBEB"},
-                    {"range":[60,80], "color":"#EFF6FF"},
-                    {"range":[80,100],"color":"#ECFDF5"},
-                ],
-                "threshold":{"line":{"color":hc,"width":3},"thickness":.8,"value":hs},
-            },
-        ))
-        fig_g.update_layout(height=200, margin=dict(t=20,b=0,l=20,r=20),
-                            paper_bgcolor=C["surface"],
-                            font=dict(family="Inter"))
-        st.plotly_chart(fig_g, use_container_width=True)
-
-        for lbl, val in [
-            ("Cashflow Balance",   max(0,100-deficit*100)),
-            ("Spending Control",   max(0,100-rw_avg*100)),
-            ("Savings Discipline", min(100,sav_rate*200)),
-        ]:
-            clr = C["success"] if val>=60 else C["warning"] if val>=40 else C["danger"]
-            st.markdown(f"""
-            <div style="margin-bottom:.55rem">
-              <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:2px">
-                <span style="color:{C['muted']};font-weight:500">{lbl}</span>
-                <span style="color:{clr};font-weight:600">{val:.0f}</span>
-              </div>
-              <div class="hbar"><div class="hfill" style="width:{min(val,100):.0f}%;background:{clr}"></div></div>
-            </div>""", unsafe_allow_html=True)
-
-    st.markdown("<hr class='div'>", unsafe_allow_html=True)
-
-    # ── Bottom row: category mini + total orders style ──
-    cb, cr2 = st.columns([1, 1.5], gap="medium")
-
-    with cb:
-        section("📋 Quick Stats")
-        rows = [
-            ("Avg Daily Spend", fmt_rp(avg_day)),
-            ("Total Users", f"{df_d['user_id'].nunique() if not df_d.empty else 0}"),
-            ("Wants Ratio", f"{rw_avg:.1%}"),
-            ("Savings Rate", f"{sav_rate:.1%}"),
-            ("Deficit Risk", f"{deficit:.1%}"),
-        ]
-        html = ""
-        for lbl, val in rows:
-            html += f'<div class="stat-row"><span class="stat-lbl">{lbl}</span><span class="stat-val">{val}</span></div>'
-        st.markdown(f'<div style="background:{C["surface"]};border:1px solid {C["border"]};border-radius:12px;padding:.75rem 1rem">{html}</div>', unsafe_allow_html=True)
-
-        # Monthly bar mini
-        if not df_d.empty:
-            monthly = (df_d.groupby(df_d["tanggal_transaksi"].dt.to_period("M"))
-                           ["total_pengeluaran_harian"].sum().reset_index())
-            monthly["tanggal_transaksi"] = monthly["tanggal_transaksi"].astype(str)
-            fig_m = go.Figure(go.Bar(
-                x=monthly["tanggal_transaksi"],
-                y=monthly["total_pengeluaran_harian"] / 1e6,
-                marker_color=C["primary"],
-                marker_line_width=0,
-            ))
-            fig_m.update_layout(title="Spending Bulanan (Jt Rp)",
-                                yaxis_title="Juta Rp", xaxis_title="")
-            fig_style(fig_m, 220)
-            st.plotly_chart(fig_m, use_container_width=True)
-
-    with cr2:
-        section("📦 Total Orders / Monthly Spend")
-        if not df_d.empty:
-            # Replicate "total orders" bar chart from ref image with green bg
-            monthly2 = (df_d.groupby(df_d["tanggal_transaksi"].dt.to_period("M"))
-                            ["total_pengeluaran_harian"].sum().reset_index())
-            monthly2["tanggal_transaksi"] = monthly2["tanggal_transaksi"].astype(str)
-            monthly2["label"] = monthly2["tanggal_transaksi"].str[-7:-5].map(
-                {"01":"Jan","02":"Feb","03":"Mar","04":"Apr","05":"Mei","06":"Jun",
-                 "07":"Jul","08":"Agu","09":"Sep","10":"Okt","11":"Nov","12":"Des"}
-            ).fillna(monthly2["tanggal_transaksi"])
-
-            fig_to = go.Figure(go.Bar(
-                x=monthly2["label"],
-                y=monthly2["total_pengeluaran_harian"] / 1e6,
-                marker_color=C["card_hdr"],
-                marker_line_width=0,
-                width=0.45,
-            ))
-            fig_to.update_layout(
-                title="",
-                paper_bgcolor="#C8E6C9",   # green bg (ref image style)
-                plot_bgcolor="#C8E6C9",
-                yaxis=dict(showgrid=True, gridcolor="rgba(0,0,0,.08)",
-                           tickfont=dict(size=10,color="#2D5016"), zeroline=False),
-                xaxis=dict(tickfont=dict(size=10,color="#2D5016"),
-                           showgrid=False, zeroline=False),
-                margin=dict(l=6,r=6,t=12,b=6),
-                height=300,
-                font=dict(family="Inter"),
-            )
-            # Green title bar like ref image
-            st.markdown(f"""
-            <div style="background:{C['card_hdr']};color:#fff;font-size:12px;
-                        font-weight:600;padding:.55rem 1rem;border-radius:10px 10px 0 0;
-                        text-transform:uppercase;letter-spacing:.06em">
-              📦 TOTAL PENGELUARAN BULANAN
-            </div>""", unsafe_allow_html=True)
-            st.plotly_chart(fig_to, use_container_width=True)
-
-    st.markdown("<hr class='div'>", unsafe_allow_html=True)
-
-    # ── AI Insights ──
-    section("🤖 AI-Generated Insights", "Berdasarkan filter aktif")
-    insights = []
-    if deficit > filters["risk_thresh"]:
-        insights.append(("🚨","Risiko Defisit Tinggi",
-                          f"Terdeteksi {deficit:.1%} hari berisiko, melampaui threshold {filters['risk_thresh']:.0%}.",C["danger"]))
-    if avg_day > limit:
-        insights.append(("💸","Melampaui Spending Limit",
-                          f"Avg {fmt_rp(avg_day)}/hari melampaui limit {fmt_rp(limit)}.",C["warning"]))
-    if rw_avg > WANTS_ALERT:
-        insights.append(("⚠️","Wants Ratio Kritis",
-                          f"Rasio {rw_avg:.1%} melampaui batas 50%.",C["warning"]))
-    if sav_rate > SAVINGS_TARGET:
-        insights.append(("✨","Tabungan Kuat",
-                          f"{sav_rate:.1%} melampaui target 10%.",C["success"]))
-    if not insights:
-        insights.append(("✅","Posisi Stabil",
-                          f"Tidak ada flag kritis. Health: {hs}/100.",C["success"]))
-
-    cols = st.columns(min(len(insights), 2), gap="small")
-    for i,(ic,ti,tx,clr) in enumerate(insights):
-        with cols[i%len(cols)]:
-            st.markdown(f"""
-            <div class="insight-card" style="border-left:3px solid {clr};border-radius:0 10px 10px 0">
-              <span style="font-size:20px">{ic}</span>
-              <div>
-                <div class="insight-title">{ti}</div>
-                <div class="insight-body">{tx}</div>
-              </div>
-            </div>""", unsafe_allow_html=True)
-
-    close_wrap()
-
-
-# ══════════════════════════════════════════════════════════════
-#  PAGE 2: SPENDING OVERVIEW
-# ══════════════════════════════════════════════════════════════
-def page_spending(df_daily, df_trx, filters, model_ok):
-    topnav("Spending Overview", model_ok)
-    section("📊 Spending Overview", "Analisis kategori, tipe user, dan pola temporal")
-
-    df_d = filter_df(df_daily, filters)
-    df_t = filter_df(df_trx, filters) if not df_trx.empty else pd.DataFrame()
-    df_exp = df_t[df_t["tipe_transaksi"]=="Pengeluaran"] if not df_t.empty and "tipe_transaksi" in df_t.columns else pd.DataFrame()
-
-    tab1, tab2, tab3 = st.tabs(["📂 Per Kategori","👥 Per Tipe User","📅 Per Waktu"])
-
-    with tab1:
-        if df_exp.empty:
-            st.markdown(alert("📂 Upload <b>transactions_clean_v8.csv</b>.", "i"), unsafe_allow_html=True)
-        elif "kategori_srs" not in df_exp.columns:
-            st.markdown(alert("Kolom <b>kategori_srs</b> tidak ditemukan.", "w"), unsafe_allow_html=True)
-        else:
-            c1, c2 = st.columns(2)
-            with c1:
-                kat = df_exp.groupby("kategori_srs")["nominal"].sum().reset_index()
-                kat.columns = ["Kategori","Total"]
-                fig = px.pie(kat, values="Total", names="Kategori",
-                             color_discrete_sequence=C["chart"], hole=0.44)
-                fig.update_traces(textposition="inside", textinfo="percent+label", textfont_size=11)
-                fig.update_layout(title="Kategori SRS", showlegend=False,
-                                  height=340, margin=dict(t=40,b=0,l=0,r=0),
-                                  paper_bgcolor=C["surface"],font=dict(family="Inter"))
-                st.plotly_chart(fig, use_container_width=True)
-            with c2:
-                top = kat.sort_values("Total",ascending=False).head(10)
-                fig2 = px.bar(top,x="Total",y="Kategori",orientation="h",
-                              color="Total",color_continuous_scale=["#EFF6FF",C["primary"]],
-                              title="Top 10 Kategori")
-                fig2.update_traces(texttemplate="Rp%{x:,.0f}",textposition="outside")
-                fig_style(fig2, 340)
-                st.plotly_chart(fig2, use_container_width=True)
-            if "needs_wants" in df_exp.columns:
-                st.markdown("<hr class='div'>", unsafe_allow_html=True)
-                nw = (df_exp.groupby(["kategori_srs","needs_wants"])["nominal"]
-                            .sum().unstack(fill_value=0)/1e6)
-                fig3 = go.Figure()
-                for col_n,clr in [("Needs",C["success"]),("Wants",C["danger"])]:
-                    if col_n in nw.columns:
-                        fig3.add_trace(go.Bar(name=col_n,x=nw.index,y=nw[col_n],marker_color=clr))
-                fig3.update_layout(barmode="stack",title="Needs vs Wants (Jt Rp)",xaxis_tickangle=-30)
-                fig_style(fig3, 300)
-                st.plotly_chart(fig3, use_container_width=True)
-
-    with tab2:
-        if df_d.empty or "tipe_user" not in df_d.columns:
-            st.info("Data tipe user tidak tersedia.")
-        else:
-            agg = (df_d.groupby("tipe_user")
-                       .agg(avg_spend=("total_pengeluaran_harian","mean"),
-                            deficit_risk=("label_defisit_besok","mean"),
-                            avg_wants=("rasio_wants","mean"))
-                       .reset_index())
-            c1,c2 = st.columns(2)
-            with c1:
-                fig = px.bar(agg.sort_values("avg_spend"),x="avg_spend",y="tipe_user",
-                             orientation="h",color="avg_spend",
-                             color_continuous_scale=["#EFF6FF",C["primary"]],
-                             title="Avg Daily Spending")
-                fig.add_vline(x=filters["spend_limit"],line_dash="dot",
-                              line_color=C["danger"],
-                              annotation_text=f"Limit {fmt_rp(filters['spend_limit'])}")
-                fig.update_traces(texttemplate="Rp%{x:,.0f}",textposition="outside")
-                fig_style(fig, 340)
-                st.plotly_chart(fig, use_container_width=True)
-            with c2:
-                fig2 = px.scatter(agg,x="avg_wants",y="deficit_risk",size="avg_spend",
-                                  color="tipe_user",color_discrete_sequence=C["chart"],
-                                  title="Profil Risiko")
-                fig2.add_hline(y=filters["risk_thresh"],line_dash="dash",line_color=C["warning"],
-                               annotation_text=f"Threshold {filters['risk_thresh']:.0%}")
-                fig_style(fig2, 340)
-                st.plotly_chart(fig2, use_container_width=True)
-
-    with tab3:
-        if df_d.empty:
-            st.info("Tidak ada data.")
-        else:
-            c1,c2 = st.columns(2)
-            with c1:
-                fm = {2:"Tgl Muda",1:"Tengah",0:"Tgl Tua"}
-                fd = df_d.groupby("fase_bulan_encoded")["total_pengeluaran_harian"].mean().rename(index=fm)
-                fig = px.bar(x=fd.index,y=fd.values,color=fd.values,
-                             color_continuous_scale=["#6EE7B7","#F59E0B","#EF4444"],
-                             title="Payday Effect")
-                fig.add_hline(y=filters["spend_limit"],line_dash="dot",line_color=C["danger"],
-                              annotation_text=f"Limit {fmt_rp(filters['spend_limit'])}")
-                fig.update_coloraxes(showscale=False)
-                fig_style(fig, 300)
-                st.plotly_chart(fig, use_container_width=True)
-            with c2:
-                dm = {0:"Sen",1:"Sel",2:"Rab",3:"Kam",4:"Jum",5:"Sab",6:"Min"}
-                dd = df_d.groupby("hari_dalam_minggu")["total_pengeluaran_harian"].mean().rename(index=dm)
-                clrs = [C["danger"] if i>=5 else C["primary"] for i in range(7)]
-                fig2 = px.bar(x=dd.index,y=dd.values,color=pd.Series(clrs),
-                              color_discrete_map="identity",title="Weekend Effect")
-                fig_style(fig2, 300)
-                st.plotly_chart(fig2, use_container_width=True)
-
-    close_wrap()
-
-
-# ══════════════════════════════════════════════════════════════
-#  PAGE 3: LSTM PREDICTION
-# ══════════════════════════════════════════════════════════════
-def page_lstm(df_daily, filters, model, model_ok, model_msg, scalers, scalers_ok):
-    topnav("LSTM Prediction", model_ok)
-    engine_clr = "#6EE7B7" if model_ok else "#FDE68A"
-    st.markdown(f"""
-    <div class="lstm-banner">
-      <div style="display:inline-block;background:rgba(79,110,247,.3);color:{engine_clr};
-                  font-size:10px;font-weight:600;padding:3px 14px;border-radius:20px;margin-bottom:10px">
-        {"● TF LSTM Active · "+model_msg if model_ok else "● Heuristic Mode"}
-      </div>
-      <h2 style="font-size:19px;font-weight:700;margin:0 0 4px">LSTM Forecasting Center</h2>
-      <p style="font-size:13px;color:#CBD5E1;margin:0">
-        Seq {SEQ_LEN}d · {N_FEATURES} fitur · P(defisit besok) · Threshold: {filters['risk_thresh']:.0%}
-      </p>
-    </div>""", unsafe_allow_html=True)
-
-    if not model_ok:
-        st.markdown(alert(f"⚠️ {model_msg}. Heuristik aktif.", "w"), unsafe_allow_html=True)
-    if not scalers_ok:
-        st.markdown(alert("⚠️ scalers_v8.pkl tidak ditemukan.", "w"), unsafe_allow_html=True)
-
-    all_users = sorted(df_daily["user_id"].unique().tolist()) if not df_daily.empty else []
-    uid = filters["user"]
-    if uid == "All Users":
-        if not all_users: st.info("Tidak ada data."); close_wrap(); return
-        uid = st.selectbox("🔍 Pilih user", all_users)
-    if not uid or uid == "All Users":
-        st.info("Pilih user spesifik."); close_wrap(); return
-
-    df_u = df_daily[df_daily["user_id"]==uid].sort_values("tanggal_transaksi").reset_index(drop=True)
-    if df_u.empty:
-        st.warning(f"Tidak ada data untuk `{uid}`."); close_wrap(); return
-
-    with st.spinner(f"🧠 Inferensi {uid}..."):
-        if model_ok:
-            result    = predict_user(uid, df_daily, model, scalers)
-            fc_result = forecast_30_days(uid, df_daily, model, scalers)
-        else:
-            result    = heuristic_predict(df_u)
-            fc_result = {"error":"Model tidak tersedia"}
-
-    if result.get("error"):
-        st.error(f"Error: {result['error']}"); close_wrap(); return
-
-    prob, status, pred = result["probability"], result["status"], result["prediction"]
-    is_h = result.get("heuristic", False)
-
-    SCFG = {
-        "AMAN":    (C["success"],"🟢","alert-s","Posisi keuangan stabil."),
-        "WASPADA": (C["warning"],"🟡","alert-w","Risiko moderat. Pantau pengeluaran."),
-        "BAHAYA":  (C["danger"], "🔴","alert-d","Risiko tinggi! Tindakan segera."),
-    }
-    s_color,s_icon,s_alert,s_msg = SCFG[status]
-    ring = int(prob*180)
-
-    cg,cd = st.columns([1,2])
-    with cg:
-        st.markdown(f"""
-        <div style="background:{C['surface']};border:1px solid {C['border']};border-radius:12px;
-                    padding:1.25rem;text-align:center">
-          <div style="font-size:10px;font-weight:600;color:{C['muted']};text-transform:uppercase;
-                      letter-spacing:.07em;margin-bottom:10px">
-            {"Heuristic" if is_h else "LSTM"} Risk Assessment
-          </div>
-          <div style="width:140px;height:140px;border-radius:50%;
-                      background:conic-gradient({s_color} 0deg,{s_color} {ring}deg,#E2E8F0 {ring}deg);
-                      display:flex;align-items:center;justify-content:center;
-                      margin:0 auto 10px;box-shadow:0 0 0 8px {C['bg']}">
-            <div style="width:100px;height:100px;background:#fff;border-radius:50%;
-                        display:flex;align-items:center;justify-content:center;flex-direction:column">
-              <div style="font-size:24px;font-weight:700;color:{s_color}">{prob:.0%}</div>
-              <div style="font-size:10px;color:{C['muted']};margin-top:1px">P(defisit)</div>
-            </div>
-          </div>
-          <div style="font-size:20px;font-weight:700;color:{s_color};margin-bottom:3px">{s_icon} {status}</div>
-          <div style="font-size:11px;color:{C['muted']}">{"DEFISIT BESOK" if pred==1 else "AMAN BESOK"}</div>
-          <div style="margin-top:8px;font-size:10px;color:{C['muted']};line-height:1.6">
-            AMAN &lt;{THRESH_LOW:.0%} · BAHAYA &gt;{THRESH_HIGH:.0%}
-          </div>
-        </div>""", unsafe_allow_html=True)
-
-    with cd:
-        st.markdown(f'<div class="{s_alert}"><b>{status}:</b> {s_msg}</div>', unsafe_allow_html=True)
-        RECS = {
-            "AMAN":    ["✅ Disiplin saat ini efektif.","💰 Naikkan target tabungan 15–20%.","📈 Jelajahi investasi risiko rendah."],
-            "WASPADA": ["⚠️ Kurangi Wants 25% minggu ini.","📊 Aktifkan notifikasi harian.","🚫 Tunda pembelian non-esensial."],
-            "BAHAYA":  ["🚨 Hentikan pengeluaran diskresioner.","💳 JANGAN gunakan Paylater.","📞 Cari dana jangka pendek (bukan pinjol)."],
-        }
-        st.markdown(f"""
-        <div style="background:{C['surface']};border:1px solid {C['border']};
-                    border-radius:12px;padding:1.1rem;margin-top:.5rem">
-          <div style="font-size:13px;font-weight:600;color:{C['text']};margin-bottom:.7rem">💡 Rekomendasi AI</div>""",
-            unsafe_allow_html=True)
-        for rec in RECS[status]:
-            st.markdown(f'<div style="font-size:12px;color:{C["muted"]};padding:.2rem 0">{rec}</div>', unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # Metric row
-    st.markdown("<div style='height:.75rem'></div>", unsafe_allow_html=True)
-    saldo_now = float(df_u["saldo_berjalan"].iloc[-1])
-    dtr_now   = float(df_u["days_to_ruin"].iloc[-1]) if "days_to_ruin" in df_u.columns else DTR_SENTINEL
-    rw_now    = float(np.nan_to_num(df_u["rasio_wants"].tail(7).mean())) if "rasio_wants" in df_u.columns else 0
-    r7_now    = float(np.nan_to_num(df_u["rolling_mean_7d"].iloc[-1])) if "rolling_mean_7d" in df_u.columns else 0
-    dtr_lbl   = f"{int(dtr_now)}d" if dtr_now<DTR_SENTINEL else "∞"
-    dtr_sub   = "🔴 Kritis" if dtr_now<DTR_CRITICAL else "🟡 Waspada" if dtr_now<DTR_WARNING else "🟢 Aman"
-    dtr_clr   = C["danger"] if dtr_now<DTR_CRITICAL else C["warning"] if dtr_now<DTR_WARNING else C["success"]
-
-    m = st.columns(4)
-    with m[0]: st.markdown(kpi_card("SALDO SEKARANG",fmt_rp(saldo_now),"","",icon="💰",icon_bg=C["success"] if saldo_now>0 else C["danger"]), unsafe_allow_html=True)
-    with m[1]: st.markdown(kpi_card("DAYS TO RUIN",dtr_lbl,dtr_sub,dtr_clr,icon="⏰",icon_bg=dtr_clr), unsafe_allow_html=True)
-    with m[2]: st.markdown(kpi_card("WANTS RATIO 7D",f"{rw_now:.1%}","🔴 Tinggi" if rw_now>WANTS_ALERT else "🟢 OK",C["danger"] if rw_now>WANTS_ALERT else C["success"],icon="🎯",icon_bg=C["warning"]), unsafe_allow_html=True)
-    with m[3]: st.markdown(kpi_card("BURN RATE 7D",fmt_rp(r7_now),"Avg harian","",icon="🔥",icon_bg=C["warning"]), unsafe_allow_html=True)
-
-    st.markdown("<hr class='div'>", unsafe_allow_html=True)
-    section("📅 30-Day Rolling Forecast", f"User: {uid} · Threshold: {filters['risk_thresh']:.0%}")
-
-    if fc_result.get("error"):
-        st.markdown(alert(f"ℹ️ {fc_result['error']}. Proyeksi linear.", "i"), unsafe_allow_html=True)
-        avg_spend   = r7_now if r7_now>0 else 80_000
-        avg_inc_d   = float(np.nan_to_num(df_u["total_pemasukan_harian"].mean()))
-        daily_net   = avg_inc_d - avg_spend
-        dates_fc    = [df_u["tanggal_transaksi"].iloc[-1]+timedelta(days=i+1) for i in range(30)]
-        balances_fc = [saldo_now+daily_net*(i+1) for i in range(30)]
-        probs_fc    = [float(np.clip(.5-daily_net/max(abs(avg_spend),1)*(i/30),.05,.95)) for i in range(30)]
-        fc_result   = {"dates":dates_fc,"probs":probs_fc,"balances":balances_fc,
-                       "n_deficit_days":sum(1 for b in balances_fc if b<0),"error":None}
-
-    dates_fc, probs_fc = fc_result["dates"], fc_result["probs"]
-    balances_fc, n_def = fc_result["balances"], fc_result["n_deficit_days"]
-    thresh = filters["risk_thresh"]
-
-    fk = st.columns(4)
-    with fk[0]: st.markdown(kpi_card("SALDO 7D",fmt_rp(balances_fc[6]),"","",icon="📅",icon_bg=C["success"] if balances_fc[6]>0 else C["danger"]), unsafe_allow_html=True)
-    with fk[1]: st.markdown(kpi_card("SALDO 30D",fmt_rp(balances_fc[-1]),"","",icon="📆",icon_bg=C["success"] if balances_fc[-1]>0 else C["danger"]), unsafe_allow_html=True)
-    with fk[2]: st.markdown(kpi_card("AVG RISK PROB",f"{np.mean(probs_fc):.1%}","Output LSTM","",icon="🧠",icon_bg=C["danger"] if np.mean(probs_fc)>THRESH_HIGH else C["warning"]), unsafe_allow_html=True)
-    with fk[3]: st.markdown(kpi_card("HARI DEFISIT",f"{n_def}/30","🔴 Tinggi" if n_def>15 else "🟢 OK","",icon="⚠️",icon_bg=C["danger"] if n_def>15 else C["success"]), unsafe_allow_html=True)
-
-    cl2, cr2 = st.columns([1.6, 1])
-    with cl2:
-        hist_dt  = df_u["tanggal_transaksi"].tail(60)
-        hist_bal = df_u["saldo_berjalan"].tail(60)
-        fig = make_subplots(rows=2,cols=1,shared_xaxes=True,row_heights=[.55,.45],vertical_spacing=.06)
-        fig.add_trace(go.Scatter(x=hist_dt,y=hist_bal,fill="tozeroy",
-                                 fillcolor="rgba(79,110,247,.08)",
-                                 line=dict(color=C["primary"],width=2),name="Saldo Historis"),row=1,col=1)
-        fig.add_trace(go.Scatter(x=dates_fc,y=balances_fc,
-                                 line=dict(color=C["success"],width=2.5,dash="dash"),
-                                 fill="tozeroy",fillcolor="rgba(34,197,94,.07)",
-                                 name="Proyeksi LSTM"),row=1,col=1)
-        fig.add_hline(y=0,line=dict(color=C["danger"],dash="dot",width=1.5),row=1,col=1)
-        bar_c = [C["danger"] if p>=THRESH_HIGH else C["warning"] if p>=thresh else C["success"]
-                 for p in probs_fc]
-        fig.add_trace(go.Bar(x=dates_fc,y=[p*100 for p in probs_fc],
-                             marker_color=bar_c,name="P(defisit)%",opacity=.85),row=2,col=1)
-        fig.add_hline(y=THRESH_HIGH*100,line_dash="dash",line_color=C["danger"],
-                      annotation_text="BAHAYA",row=2,col=1)
-        fig.add_hline(y=thresh*100,line_dash="dash",line_color=C["warning"],
-                      annotation_text=f"Threshold {thresh:.0%}",row=2,col=1)
-        # "Hari ini" — fix: add_shape not add_vline (avoids TypeError on datetime axis)
-        today_x = pd.Timestamp(hist_dt.iloc[-1]).isoformat()
-        for _r in [1,2]:
-            fig.add_shape(type="line",xref="x",yref="paper",
-                          x0=today_x,x1=today_x,y0=0,y1=1,
-                          line=dict(color="#94A3B8",width=2,dash="dash"),row=_r,col=1)
-        fig.add_annotation(x=today_x,y=1,xref="x",yref="paper",
-                           text="Hari ini",showarrow=False,
-                           font=dict(size=11,color="#94A3B8"),
-                           xanchor="left",yanchor="top",
-                           bgcolor="rgba(255,255,255,.8)",row=1,col=1)
-        fig.update_yaxes(title_text="Saldo (Rp)",tickformat=",.0f",row=1,col=1)
-        fig.update_yaxes(title_text="Risiko %",ticksuffix="%",range=[0,110],row=2,col=1)
-        fig.update_layout(title=f"Forecast 30 Hari — {uid}",hovermode="x unified",
-                          legend=dict(orientation="h",yanchor="bottom",y=1.02,xanchor="right",x=1))
-        fig_style(fig, 480)
-        st.plotly_chart(fig, use_container_width=True)
-
-    with cr2:
-        section("📊 7-Hari Breakdown")
-        day_lbl = [pd.Timestamp(d).strftime("%a %d/%m") for d in dates_fc[:7]]
-        bc7 = [C["danger"] if p>=THRESH_HIGH else C["warning"] if p>=thresh else C["success"]
-               for p in probs_fc[:7]]
-        fig7 = go.Figure(go.Bar(x=day_lbl,y=[p*100 for p in probs_fc[:7]],
-                                marker_color=bc7,text=[f"{p:.0%}" for p in probs_fc[:7]],
-                                textposition="outside"))
-        fig7.add_hline(y=thresh*100,line_dash="dot",line_color=C["warning"])
-        fig7.update_layout(yaxis=dict(range=[0,130]),xaxis_title="")
-        fig_style(fig7, 250)
-        st.plotly_chart(fig7, use_container_width=True)
-
-        st.markdown(f"""
-        <div style="background:{C['surface']};border:1px solid {C['border']};
-                    border-radius:10px;padding:.875rem">
-          <div style="font-size:12px;font-weight:600;color:{C['text']};margin-bottom:.7rem">
-            Proyeksi Saldo
-          </div>""", unsafe_allow_html=True)
-        for i in [6,13,20,29]:
-            dl  = pd.Timestamp(dates_fc[i]).strftime("%d %b")
-            bal = balances_fc[i]
-            clr = C["success"] if bal>0 else C["danger"]
-            st.markdown(f"""
-            <div class="stat-row">
-              <span class="stat-lbl">Hari {i+1} · {dl}</span>
-              <span class="stat-val" style="color:{clr}">{fmt_rp(bal)}</span>
-            </div>""", unsafe_allow_html=True)
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # Engine bar
-    st.markdown("<hr class='div'>", unsafe_allow_html=True)
-    st.markdown(f"""
-    <div style="background:{C['card_hdr']};border-radius:10px;padding:1rem 1.5rem;
-                display:grid;grid-template-columns:repeat(4,1fr);gap:1rem">
-      <div style="text-align:center">
-        <div style="font-size:16px;font-weight:600;color:#A5B4FC;font-family:monospace">LSTM</div>
-        <div style="font-size:11px;color:#64748B;margin-top:2px">Architecture</div>
-      </div>
-      <div style="text-align:center">
-        <div style="font-size:16px;font-weight:600;color:#6EE7B7;font-family:monospace">{SEQ_LEN}×{N_FEATURES}</div>
-        <div style="font-size:11px;color:#64748B;margin-top:2px">Seq × Features</div>
-      </div>
-      <div style="text-align:center">
-        <div style="font-size:16px;font-weight:600;color:#FDE68A;font-family:monospace">54,750</div>
-        <div style="font-size:11px;color:#64748B;margin-top:2px">Training Obs</div>
-      </div>
-      <div style="text-align:center">
-        <div style="font-size:16px;font-weight:600;color:{'#6EE7B7' if model_ok else '#FDE68A'};font-family:monospace">
-          {'✅ Active' if model_ok else '⚡ Fallback'}
-        </div>
-        <div style="font-size:11px;color:#64748B;margin-top:2px">Engine</div>
-      </div>
-    </div>""", unsafe_allow_html=True)
-    close_wrap()
-
-
-# ══════════════════════════════════════════════════════════════
-#  PAGE 4–8: identical logic to v10, updated visual wrapping
-# ══════════════════════════════════════════════════════════════
-def page_risk(df_daily, filters, model, model_ok, scalers):
-    topnav("Risk & Early Warning", model_ok)
-    section("⚡ Risk & Early Warning",
-            f"Threshold: {filters['risk_thresh']:.0%} · Limit: {fmt_rp(filters['spend_limit'])}/hari")
-    df_d = filter_df(df_daily, filters)
-    if df_d.empty:
-        st.warning("Tidak ada data."); close_wrap(); return
-
-    c1,c2 = st.columns(2)
-    with c1:
-        if "days_to_ruin" in df_d.columns:
-            dtr  = df_d[df_d["days_to_ruin"]<DTR_SENTINEL]["days_to_ruin"]
-            nc   = int((dtr<=DTR_CRITICAL).sum())
-            nw   = int(((dtr>DTR_CRITICAL)&(dtr<=DTR_WARNING)).sum())
-            ns   = int((dtr>DTR_WARNING).sum())
-            fig  = go.Figure()
-            fig.add_trace(go.Histogram(x=dtr,nbinsx=40,marker_color=C["primary"],opacity=.8))
-            fig.add_vline(x=DTR_CRITICAL,line_dash="dash",line_color=C["danger"],
-                          annotation_text=f"🔴 {DTR_CRITICAL}d")
-            fig.add_vline(x=DTR_WARNING, line_dash="dash",line_color=C["warning"],
-                          annotation_text=f"🟡 {DTR_WARNING}d")
-            fig.update_layout(title="Distribusi Days to Ruin",xaxis_title="Hari")
-            fig_style(fig,300); st.plotly_chart(fig, use_container_width=True)
-            m3 = st.columns(3)
-            with m3[0]: st.markdown(kpi_card("KRITIS",f"{nc:,}",f"≤{DTR_CRITICAL}d","",icon="🔴",icon_bg=C["danger"]),unsafe_allow_html=True)
-            with m3[1]: st.markdown(kpi_card("WASPADA",f"{nw:,}","","",icon="🟡",icon_bg=C["warning"]),unsafe_allow_html=True)
-            with m3[2]: st.markdown(kpi_card("AMAN",f"{ns:,}","","",icon="🟢",icon_bg=C["success"]),unsafe_allow_html=True)
-    with c2:
-        if "doom_spending_harian" in df_d.columns:
-            tl = (df_d.groupby("tanggal_transaksi")
-                      .agg(doom=("doom_spending_harian","sum"),shock=("shock_harian","sum"))
-                      .reset_index())
-            fig2 = go.Figure()
-            fig2.add_trace(go.Bar(x=tl["tanggal_transaksi"],y=tl["doom"]/1000,marker_color=C["warning"],name="Doom (K)"))
-            fig2.add_trace(go.Bar(x=tl["tanggal_transaksi"],y=tl["shock"]/1000,marker_color=C["danger"],name="Shock (K)"))
-            fig2.add_hline(y=filters["spend_limit"]/1000,line_dash="dot",line_color=C["primary"],
-                           annotation_text=f"Limit {fmt_rp(filters['spend_limit'])}")
-            fig2.update_layout(barmode="stack",title="Doom Spending vs Shock")
-            fig_style(fig2,300); st.plotly_chart(fig2, use_container_width=True)
-
-    if "tipe_user" in df_d.columns:
-        st.markdown("<hr class='div'>", unsafe_allow_html=True)
-        section("🗓️ Risk Heatmap: Tipe User × Fase Bulan")
-        pivot = (df_d.groupby(["tipe_user","fase_bulan_encoded"])["label_defisit_besok"]
-                     .mean().unstack())
-        pivot.columns = ["Tgl Tua","Tengah","Tgl Muda"]
-        fig3 = px.imshow(pivot,text_auto=".1%",color_continuous_scale="RdYlGn_r",
-                         title="Deficit Risk",aspect="auto",zmin=0,zmax=1)
-        fig3.update_layout(height=340,margin=dict(t=40,b=0,l=0,r=0),
-                           paper_bgcolor=C["surface"],font=dict(family="Inter"))
-        st.plotly_chart(fig3, use_container_width=True)
-
-    if filters["user"]=="All Users" and model_ok:
-        st.markdown("<hr class='div'>", unsafe_allow_html=True)
-        section("🏮 Live LSTM Watchlist","Batch inference top-15")
-        with st.spinner("Batch inference..."):
-            uids = (df_daily.groupby("user_id")["label_defisit_besok"]
-                            .mean().sort_values(ascending=False).head(15).index.tolist())
-            seqs, vids = [], []
-            for u in uids:
-                du = df_daily[df_daily["user_id"]==u].sort_values("tanggal_transaksi")
-                if du.empty: continue
-                if any(c not in du.columns for c in FEATURE_COLS): continue
-                Xr = du[FEATURE_COLS].fillna(0).values.astype(np.float32)
-                Xs,_ = _scale_features(u,Xr,scalers)
-                seqs.append(_build_seq(Xs)[0]); vids.append(u)
-            if seqs:
-                pb = model.predict(np.array(seqs),verbose=0).flatten()
-                rows=[]
-                for u,p in zip(vids,pb):
-                    p=float(np.clip(p,0,1))
-                    st2="BAHAYA" if p>=THRESH_HIGH else "WASPADA" if p>=filters["risk_thresh"] else "AMAN"
-                    du=df_daily[df_daily["user_id"]==u]
-                    rows.append({"User":u,"Tipe":du["tipe_user"].iloc[0] if "tipe_user" in du.columns else "N/A",
-                                 "P(defisit)":f"{p:.1%}","Status":st2,
-                                 "Saldo":fmt_rp(float(du["saldo_berjalan"].iloc[-1])),
-                                 "DTR":f"{int(du['days_to_ruin'].iloc[-1])}d" if "days_to_ruin" in du.columns else "N/A"})
-                st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
-    close_wrap()
-
-
-def page_behavior(df_daily, filters, model_ok):
-    topnav("Behavior Analysis", model_ok)
-    section("📈 Behavior Analysis","Psikologi pengeluaran · momentum")
-    df_d = filter_df(df_daily, filters)
-    if df_d.empty: st.warning("Tidak ada data."); close_wrap(); return
-    c1,c2 = st.columns(2)
-    with c1:
-        fig = px.histogram(df_d,x="rasio_wants",nbins=40,color_discrete_sequence=[C["primary"]],title="Distribusi Wants Ratio")
-        fig.add_vline(x=.5,line_dash="dash",line_color=C["danger"],annotation_text="50%")
-        fig_style(fig,290); st.plotly_chart(fig, use_container_width=True)
-    with c2:
-        samp = df_d.sample(min(3000,len(df_d)),random_state=42)
-        fig2 = px.scatter(samp,x="rasio_wants",y="saldo_berjalan",color="label_defisit_besok",
-                          color_discrete_map={0:C["success"],1:C["danger"]},opacity=.4,title="Wants vs Saldo")
-        fig_style(fig2,290); st.plotly_chart(fig2, use_container_width=True)
-    st.markdown("<hr class='div'>", unsafe_allow_html=True)
-    c3,c4 = st.columns(2)
-    with c3:
-        if "pengeluaran_lag_1d" in df_d.columns:
-            s2 = df_d.sample(min(2000,len(df_d)),random_state=42)
-            fig3 = px.scatter(s2,x="pengeluaran_lag_1d",y="total_pengeluaran_harian",
-                              color="label_defisit_besok",color_discrete_map={0:C["success"],1:C["danger"]},
-                              opacity=.4,title="Momentum: Kemarin vs Hari Ini")
-            mx = float(df_d["total_pengeluaran_harian"].max())
-            fig3.add_shape(type="line",x0=0,y0=0,x1=mx,y1=mx,line=dict(color=C["muted"],dash="dash",width=1))
-            fig_style(fig3,290); st.plotly_chart(fig3, use_container_width=True)
-    with c4:
-        if "rolling_std_7d" in df_d.columns:
-            vol = df_d.groupby("tanggal_transaksi")["rolling_std_7d"].mean().reset_index()
-            fig4 = go.Figure()
-            fig4.add_trace(go.Scatter(x=vol["tanggal_transaksi"],y=vol["rolling_std_7d"],
-                                      fill="tozeroy",fillcolor="rgba(239,68,68,.08)",
-                                      line=dict(color=C["danger"],width=2)))
-            fig4.update_layout(title="Volatilitas 7 Hari")
-            fig_style(fig4,290); st.plotly_chart(fig4, use_container_width=True)
-    close_wrap()
-
-
-def page_category(df_trx, filters, model_ok):
-    topnav("Category Deep Dive", model_ok)
-    section("🔍 Category Deep Dive","Granular per kategori")
-    df_t   = filter_df(df_trx, filters) if not df_trx.empty else pd.DataFrame()
-    df_exp = df_t[df_t["tipe_transaksi"]=="Pengeluaran"] if not df_t.empty and "tipe_transaksi" in df_t.columns else pd.DataFrame()
-    if df_exp.empty:
-        st.markdown(alert("Upload <b>transactions_clean_v8.csv</b>.","i"),unsafe_allow_html=True); close_wrap(); return
-    if "kategori" not in df_exp.columns:
-        st.markdown(alert("Kolom <b>kategori</b> tidak ditemukan.","w"),unsafe_allow_html=True); close_wrap(); return
-    agg = df_exp.groupby("kategori")["nominal"].agg(["sum","mean","count"]).reset_index()
-    agg.columns = ["Kategori","Total","Rata-rata","Frekuensi"]
-    agg = agg.sort_values("Total",ascending=False).head(20)
-    fig = px.treemap(agg,path=["Kategori"],values="Total",color="Rata-rata",
-                     color_continuous_scale="Blues",title="Treemap Kategori")
-    fig.update_layout(height=400,margin=dict(t=50,b=0,l=0,r=0),
-                      paper_bgcolor=C["surface"],font=dict(family="Inter"))
-    st.plotly_chart(fig, use_container_width=True)
-    c1,c2 = st.columns(2)
-    with c1:
-        fig2 = px.bar(agg.head(15),x="Total",y="Kategori",orientation="h",
-                      color="Frekuensi",color_continuous_scale="Purples",title="Top 15 by Total")
-        fig_style(fig2,380); st.plotly_chart(fig2, use_container_width=True)
-    with c2:
-        fig3 = px.scatter(agg,x="Frekuensi",y="Rata-rata",size="Total",color="Kategori",title="Frekuensi vs Avg")
-        fig_style(fig3,380); st.plotly_chart(fig3, use_container_width=True)
-    close_wrap()
-
-
-def page_ab(model_ok):
-    topnav("A/B Testing", model_ok)
-    section("⚖️ A/B Testing","Early Warning System · Signifikansi statistik")
-    with st.expander("📖 Desain Eksperimen"):
-        st.markdown("| | Grup A Kontrol | Grup B Treatment |\n|---|---|---|\n| Intervensi | Tidak ada | Early Warning System |\n| Trigger | — | P(defisit) > 55% |")
-    df_ab = load_optional("ab_testing_results.csv")
-    if not df_ab.empty and "group" in df_ab.columns:
-        ma = df_ab["group"].str.contains("kontrol",case=False,na=False)
-        mb = df_ab["group"].str.contains("treatment",case=False,na=False)
-        ra_row = df_ab[ma].iloc[0] if ma.any() else None
-        rb_row = df_ab[mb].iloc[0] if mb.any() else None
-        if ra_row is not None and rb_row is not None:
-            ra,rb = float(ra_row["deficit_rate"]),float(rb_row["deficit_rate"])
-            k = st.columns(4)
-            with k[0]: st.markdown(kpi_card("CONTROL RATE",f"{ra:.1%}","Grup A","",icon="🔴",icon_bg=C["danger"]),unsafe_allow_html=True)
-            with k[1]: st.markdown(kpi_card("TREATMENT RATE",f"{rb:.1%}","Grup B","",icon="🟢",icon_bg=C["success"]),unsafe_allow_html=True)
-            with k[2]: st.markdown(kpi_card("ABSOLUTE Δ",f"{ra-rb:.1%}","Pengurangan","",icon="📉",icon_bg=C["primary"]),unsafe_allow_html=True)
-            with k[3]: st.markdown(kpi_card("RELATIVE Δ",f"{(ra-rb)/max(abs(ra),1e-8):.1%}","vs Kontrol","",icon="✨",icon_bg=C["secondary"]),unsafe_allow_html=True)
-            fig = px.bar(pd.DataFrame({"Grup":["A Kontrol","B Treatment"],"Rate":[ra*100,rb*100]}),
-                         x="Grup",y="Rate",color="Grup",
-                         color_discrete_sequence=[C["danger"],C["success"]],
-                         text_auto=".1f",title="Hasil A/B")
-            fig.update_traces(texttemplate="%{text}%",textposition="outside")
-            fig_style(fig,360); st.plotly_chart(fig, use_container_width=True)
-            try:
-                pf = float(ra_row.get("chi2_p",1))
-                st.markdown(alert(f"{'✅ p='+str(round(pf,4))+' — SIGNIFIKAN' if pf<.05 else '⚠️ p='+str(round(pf,4))+' — Belum signifikan'}",
-                                  "s" if pf<.05 else "w"), unsafe_allow_html=True)
-            except Exception: pass
+@st.cache_data(show_spinner=False)
+def xgb_gain_importance(model_path: str, feature_names: tuple) -> pd.DataFrame | None:
+    """Total gain per fitur, dibaca langsung dari JSON model XGBoost (tanpa library xgboost)."""
+    with open(model_path, encoding="utf-8") as fh:
+        model = json.load(fh)
+    n_feat = int(model["learner"]["learner_model_param"]["num_feature"])
+    if len(feature_names) != n_feat:
+        return None
+    gain = np.zeros(n_feat)
+    for tree in model["learner"]["gradient_booster"]["model"]["trees"]:
+        left = np.asarray(tree["left_children"])
+        idx = np.asarray(tree["split_indices"])
+        loss = np.asarray(tree["loss_changes"], dtype=float)
+        internal = left != -1
+        np.add.at(gain, idx[internal], loss[internal])
+    if gain.sum() <= 0:
+        return None
+    out = pd.DataFrame({"Fitur": list(feature_names), "Gain": gain / gain.sum()})
+    return out.sort_values("Gain", ascending=False).reset_index(drop=True)
+
+
+def scaled_feature_names(scaled_path: str) -> tuple:
+    """Urutan fitur array model = urutan kolom sc_* pada scaled_full_v8.csv."""
+    cols = pd.read_csv(scaled_path, nrows=0).columns
+    return tuple(c[3:] for c in cols if c.startswith("sc_"))
+
+
+def feature_group(col: str) -> str:
+    """Kelompok feature engineering untuk setiap kolom daily_features_v8.csv."""
+    if col in ("user_id", "tanggal_transaksi", "tipe_user"):
+        return "Identitas"
+    if col == "label_defisit_besok":
+        return "Target"
+    if re.search(r"_lag_|^rolling_", col):
+        return "Lag & rolling window"
+    if re.search(r"^(sin_|cos_)|hari_dalam|^bulan$|is_weekend|is_harbolnas|fase_bulan", col):
+        return "Kalender & musiman"
+    if col in ("days_to_ruin", "interaksi_hedon_muda", "kebiasaan_boros_harian"):
+        return "Turunan risiko"
+    if col in ("usia", "tipe_user_encoded"):
+        return "Profil pengguna"
+    if col.startswith(("saldo_", "total_pemasukan", "total_pengeluaran")):
+        return "Arus kas harian"
+    return "Perilaku belanja"
+
+
+def status_of(dtr: float) -> str:
+    if dtr <= DTR_BAHAYA:
+        return "BAHAYA"
+    if dtr <= DTR_WASPADA:
+        return "WASPADA"
+    return "AMAN"
+
+
+def status_series(dtr: pd.Series, bahaya_max: float, waspada_max: float) -> pd.Categorical:
+    s = np.where(dtr <= bahaya_max, "BAHAYA", np.where(dtr <= waspada_max, "WASPADA", "AMAN"))
+    return pd.Categorical(s, categories=["BAHAYA", "WASPADA", "AMAN"], ordered=True)
+
+
+def missing_data_screen(paths: dict) -> None:
+    hero("Data belum ditemukan", "Dashboard membutuhkan dua file hasil pipeline", badge="Setup")
+    st.error("File wajib tidak ditemukan, sehingga dashboard berhenti. "
+             "Tidak ada data pengganti yang dibuat agar hasil analisis tidak menyesatkan.")
+    rows = []
+    for key in ("transactions", "daily"):
+        name, folder = FILE_SPECS[key]
+        rows.append({"File wajib": name, "Status": "✅ ada" if paths.get(key) else "❌ tidak ada",
+                     "Lokasi yang dicari": f"{folder}/  ·  folder yang sama dengan skrip  ·  data/"})
+    show_df(pd.DataFrame(rows))
+    st.markdown("Jalankan pipeline `01_data_generator.py` → `02_wrangling_eda.py`, lalu letakkan hasilnya "
+                "pada salah satu lokasi di atas.")
+
+
+# =============================================================================
+#  6. HELPER ANALISIS
+# =============================================================================
+def date_id(ts) -> str:
+    ts = pd.Timestamp(ts)
+    return f"{ts.day} {BULAN[ts.month - 1]} {ts.year}"
+
+
+def goto(page: str) -> None:
+    st.session_state["page"] = page
+
+
+def read_optional(C: dict, key: str) -> pd.DataFrame | None:
+    path = C["paths"].get(key)
+    return load_csv(str(path)) if path else None
+
+
+def agg_value(df: pd.DataFrame, keys: list, how: str) -> pd.DataFrame:
+    g = df.groupby(keys, observed=True)["nominal"]
+    s = g.sum() if how == "sum" else g.count() if how == "count" else g.mean()
+    return s.rename("nilai").reset_index()
+
+
+def avg_per_user_day(df: pd.DataFrame, key: str, n_users: int, key_counts: pd.Series) -> pd.Series:
+    """Rata-rata belanja per pengguna per hari untuk setiap nilai `key` (mis. tanggal 1..31)."""
+    tot = df.groupby(key)["nominal"].sum()
+    tot.index = tot.index.astype(int)
+    denom = key_counts * max(n_users, 1)
+    return (tot / denom).reindex(denom.index).fillna(0.0)
+
+
+def q_card(num: str, question: str, metric: str, answer_html: str) -> str:
+    return (f'<div class="fp-q"><span class="qn">{esc(num)}</span><div class="qt">{esc(question)}</div>'
+            f'<div class="qm">Metrik: {esc(metric)}</div><div class="qa">{answer_html}</div></div>')
+
+
+# =============================================================================
+#  HALAMAN 1 — RINGKASAN
+# =============================================================================
+def page_ringkasan(C: dict) -> None:
+    tx, dy = C["tx"], C["dy"]
+    ex = tx[tx["tipe_transaksi"] == "Pengeluaran"]
+    inc = tx[tx["tipe_transaksi"] == "Pemasukan"]
+    n_days = int(C["dy_all"].groupby("user_id", observed=True).size().max())
+
+    hero("FinPredict Analytics",
+         "Dasbor analitik prediksi arus kas & peringatan dini defisit keuangan Gen Z",
+         badge=f"Dataset simulasi · {num_id(C['n_users_all'])} pengguna × {n_days} hari · "
+               f"{num_id(len(C['tx_all']))} transaksi")
+
+    callout("Aplikasi keuangan umumnya hanya <b>mencatat masa lalu</b>, sehingga pengguna muda baru sadar "
+            "defisit ketika uang sudah habis. FinPredict memproyeksikan saldo dan memberi <b>peringatan dini</b> "
+            "sebelum anggaran terlampaui. Halaman ini merangkum temuan data yang mendasarinya.",
+            "info", "Latar belakang")
+
+    # ── KPI ──────────────────────────────────────────────────────────────────
+    exp_total = float(ex["nominal"].sum())
+    wants_total = float(ex.loc[ex["needs_wants"] == "Wants", "nominal"].sum())
+    doom = ex.loc[ex["kategori"] == "Doom Spending", "nominal"]
+    shock = ex.loc[ex["kategori"] == "Financial Shock", "nominal"]
+    risk = float(dy["label_defisit_besok"].mean())
+
+    kpi_row([
+        ("Pengguna dianalisis", num_id(C["n_users"]), f"dari {num_id(C['n_users_all'])} pengguna", BG_PURPLE),
+        ("Total pengeluaran", rp(exp_total), f"{num_id(len(ex))} transaksi", CARD),
+        ("Rasio Wants", pct(wants_total / exp_total) if exp_total else "–", "porsi belanja keinginan", BG_ORANGE),
+        ("Hari berisiko defisit", pct(risk), "label_defisit_besok = 1", PINK),
+    ])
+    st.write("")
+    kpi_row([
+        ("Total pemasukan", rp(float(inc["nominal"].sum())), f"{num_id(len(inc))} transaksi", BG_GREEN),
+        ("Doom spending", rp(float(doom.sum())), f"{num_id(len(doom))} kejadian", CARD),
+        ("Financial shock", rp(float(shock.sum())), f"{num_id(len(shock))} kejadian", CARD),
+        ("Transaksi Paylater", pct(float((ex["metode_pembayaran"] == "Paylater").mean())) if len(ex) else "–",
+         "dari semua transaksi keluar", CARD),
+    ])
+
+    # ── 5 pertanyaan bisnis ──────────────────────────────────────────────────
+    section("Pertanyaan bisnis & jawabannya",
+            "Lima pertanyaan terukur yang memandu analisis. Jawaban dihitung ulang dari data sesuai filter di sidebar.")
+
+    # Q1 — pola pengeluaran
+    g = dy.groupby("fase", observed=True)["total_pengeluaran_harian"].mean()
+    if len(g) >= 2 and g.min() > 0:
+        a1 = (f"Belanja harian tertinggi pada {b(g.idxmax())}: {b(rp(g.max()))} — "
+              f"{num_id(g.max() / g.min(), 1)}× lipat {esc(g.idxmin())}.")
     else:
-        st.markdown(alert("Jalankan <b>05_ab_testing.py</b> lalu upload <b>ab_testing_results.csv</b>.","i"),unsafe_allow_html=True)
-        demo = pd.DataFrame({"Grup":["A Kontrol","B Treatment"],"Rate":[52.3,36.6]})
-        fig  = px.bar(demo,x="Grup",y="Rate",color="Grup",
-                      color_discrete_sequence=[C["danger"],C["success"]],title="Demo")
-        fig_style(fig,320); st.plotly_chart(fig, use_container_width=True)
-    close_wrap()
+        a1 = "Data fase bulan tidak cukup pada filter ini."
+    # Q2 — kategori penyebab overspending
+    w = (ex[ex["needs_wants"] == "Wants"].groupby("kategori", observed=True)["nominal"].sum()
+         .sort_values(ascending=False))
+    if len(w) >= 3 and w.sum() > 0:
+        a2 = (f"3 kategori Wants terbesar: {b(w.index[0])}, {b(w.index[1])}, {b(w.index[2])} — "
+              f"{b(pct(w.head(3).sum() / w.sum(), 0))} dari seluruh belanja Wants.")
+    else:
+        a2 = "Data belanja Wants tidak cukup pada filter ini."
+    # Q3 — kapan risiko meningkat
+    rt = dy.groupby("tipe_user", observed=True)["label_defisit_besok"].mean()
+    rf = dy.groupby("fase", observed=True)["label_defisit_besok"].mean()
+    a3 = (f"Risiko tertinggi pada tipe {b(rt.idxmax())} ({pct(rt.max())}) dan saat {b(rf.idxmax())} "
+          f"({pct(rf.max())}).") if len(rt) and len(rf) else "Data tidak cukup pada filter ini."
+    # Q4 — apakah AI bisa memprediksi
+    mr = read_optional(C, "model_results")
+    if mr is not None and {"Model", "AUC-ROC"}.issubset(mr.columns):
+        best = mr.sort_values("AUC-ROC", ascending=False).iloc[0]
+        a4 = f"{b(best['Model'])} terbaik (AUC {num_id(best['AUC-ROC'], 3)}). "
+        prod = mr[mr["Model"] == PRODUCTION_MODEL]
+        if len(prod):
+            a4 += f"{esc(PRODUCTION_MODEL)} (model produksi): AUC {num_id(float(prod['AUC-ROC'].iloc[0]), 3)}."
+    else:
+        a4 = "model_results.csv belum tersedia."
+    # Q5 — manfaat early warning
+    ab = read_optional(C, "ab_results")
+    if ab is not None and {"group", "deficit_rate"}.issubset(ab.columns) and len(ab) >= 2:
+        ra = float(ab.loc[ab["group"].str.contains("kontrol"), "deficit_rate"].iloc[0])
+        rb = float(ab.loc[ab["group"].str.contains("treatment"), "deficit_rate"].iloc[0])
+        a5 = (f"Pada simulasi, defisit turun dari {b(pct(ra))} ke {b(pct(rb))} "
+              f"(−{pp(ra - rb)}). <i>Bukan eksperimen pengguna nyata.</i>")
+    else:
+        a5 = "ab_testing_results.csv belum tersedia."
+    a6 = ("Data bersifat <b>sintetis</b> (dibangkitkan oleh 01_data_generator.py) sehingga angka menggambarkan "
+          "skenario, bukan perilaku pengguna sebenarnya.")
+
+    cards = [
+        ("Q1", "Bagaimana pola pengeluaran pengguna?", "rata-rata belanja harian per fase bulan", a1, "🔎 Eksplorasi Pengeluaran"),
+        ("Q2", "Kategori apa penyebab overspending?", "porsi kategori terhadap belanja Wants", a2, "🔎 Eksplorasi Pengeluaran"),
+        ("Q3", "Kapan risiko defisit meningkat?", "% hari berisiko per fase, hari, bulan, tipe", a3, "⚠️ Risiko Defisit"),
+        ("Q4", "Apakah AI dapat memprediksi defisit?", "AUC-ROC, F1, Recall (validation set)", a4, "🤖 Evaluasi Model"),
+        ("Q5", "Bagaimana early warning membantu?", "defisit rate grup kontrol vs treatment", a5, "⚖️ A/B Testing"),
+    ]
+    for row in (cards[:3], cards[3:]):
+        cols = st.columns(3)
+        for col, (num, q, metric, ans, page) in zip(cols, row):
+            with col:
+                st.markdown(q_card(num, q, metric, ans), unsafe_allow_html=True)
+                st.button("Buka analisis →", key=f"go_{num}", on_click=goto, args=(page,))
+        if row is cards[3:]:
+            with cols[2]:
+                st.markdown(q_card("i", "Tentang data", "sumber & cakupan", a6), unsafe_allow_html=True)
+        st.write("")
+
+    # ── Arus kas bulanan ─────────────────────────────────────────────────────
+    section("Arus kas bulanan", "Total pemasukan vs pengeluaran seluruh pengguna pada filter aktif.")
+    cf = tx.groupby(["bulan", "tipe_transaksi"], observed=True)["nominal"].sum().reset_index()
+    cf["Bulan"] = month_labels(cf["bulan"])
+    cf = tidy(cf).rename(columns={"nominal": "Nominal (Rp)", "tipe_transaksi": "Jenis"})
+    fig = px.bar(cf, x="Bulan", y="Nominal (Rp)", color="Jenis", barmode="group",
+                 color_discrete_map={"Pengeluaran": ORANGE, "Pemasukan": GREEN})
+    fig.update_xaxes(categoryorder="array", categoryarray=list(dict.fromkeys(cf["Bulan"])))
+    fig.update_yaxes(tickformat=",.0f")
+    show(fig, 360)
+    inc_days = float((dy["total_pemasukan_harian"] > 0).mean())
+    exp_days = float((dy["total_pengeluaran_harian"] > 0).mean())
+    callout(f"Pemasukan hanya muncul pada {b(pct(inc_days))} hari-pengguna (gajian atau uang saku bersifat "
+            f"sporadis), sedangkan pengeluaran tercatat pada {b(pct(exp_days))} hari. Selisih ritme inilah yang "
+            f"membuat saldo mudah menipis tanpa disadari.")
+
+    with st.expander("✅ Kesesuaian dengan Project Brief — tugas Data Science"):
+        show_df(pd.DataFrame([
+            ("Menentukan satu solusi utama dari analisis masalah", "Ringkasan — latar belakang & solusi"),
+            ("Mendefinisikan pertanyaan bisnis yang terukur", "Ringkasan — Q1–Q5 beserta metriknya"),
+            ("Data wrangling end-to-end (gathering, assessing, cleaning)", "Data Wrangling"),
+            ("Exploratory Data Analysis", "Eksplorasi Pengeluaran · Risiko Defisit"),
+            ("Visualisasi & explanatory analysis untuk menjawab pertanyaan bisnis", "Semua halaman: grafik + kotak insight"),
+            ("Dashboard interaktif Streamlit", "Filter global, tab, slider ambang, skenario what-if"),
+            ("Data siap dipakai model + Data Dictionary", "Data Wrangling (kesiapan model) · Data Dictionary"),
+            ("Feature engineering (Side Quest)", "Data Dictionary — kelompok fitur"),
+            ("A/B Testing dengan Python (Side Quest)", "A/B Testing"),
+        ], columns=["Tugas pada Project Brief", "Ditampilkan di"]))
 
 
-def page_data(df_daily, df_trx, filters, model_ok):
-    topnav("Data & Dokumentasi", model_ok)
-    section("📋 Data Explorer & Dokumentasi")
-    tab1,tab2,tab3 = st.tabs(["🔎 Preview","📖 Kamus","📥 Download"])
-    with tab1:
-        df_d = filter_df(df_daily,filters); df_t = filter_df(df_trx,filters) if not df_trx.empty else pd.DataFrame()
-        st.markdown(f"**Daily Features** — {len(df_d):,} baris")
-        st.dataframe(df_d.tail(100),use_container_width=True,height=300)
-        if not df_t.empty:
-            st.markdown(f"**Transactions** — {len(df_t):,} baris")
-            st.dataframe(df_t.tail(200),use_container_width=True,height=300)
-    with tab2:
-        dd = load_optional("data_dictionary_v8.csv")
-        if not dd.empty:
-            q = st.text_input("🔍 Cari","")
-            if q: dd = dd[dd.apply(lambda r:q.lower() in str(r).lower(),axis=1)]
-            st.dataframe(dd,use_container_width=True,height=460)
-        else:
-            st.markdown("| Kolom | Tipe | Deskripsi |\n|---|---|---|\n| `total_pengeluaran_harian` | float | Total pengeluaran harian |\n| `saldo_berjalan` | float | Saldo kumulatif |\n| `rasio_wants` | float | Rasio Wants [0,1] |\n| `days_to_ruin` | int | Hari hingga saldo=0 |\n| `label_defisit_besok` | binary | TARGET |")
-    with tab3:
-        df_d2 = filter_df(df_daily,filters)
-        c1,c2 = st.columns(2)
+# =============================================================================
+#  HALAMAN 2 — DATA WRANGLING
+# =============================================================================
+def page_wrangling(C: dict) -> None:
+    tx_all, dy_all = C["tx_all"], C["dy_all"]
+    hero("Data Wrangling", "Dari data mentah yang kotor menjadi dataset siap analisis dan siap model",
+         badge="Gathering → Assessing → Cleaning → Model-ready")
+
+    steps = [
+        ("1", "Gathering", "Data transaksi sintetis 150 pengguna Gen Z × 365 hari dibangkitkan oleh 01_data_generator.py, "
+                           "sengaja disisipi 5 jenis “racun” data."),
+        ("2", "Assessing", "Memeriksa tipe data, nilai kosong, duplikat, serta format tanggal & nominal pada raw_dirty_v8.csv."),
+        ("3", "Cleaning", "Standardisasi, imputasi, dan deduplikasi menghasilkan transactions_clean_v8.csv."),
+        ("4", "Feature engineering", "Agregasi harian per pengguna + fitur lag, rolling, kalender, dan risiko (daily_features_v8.csv)."),
+        ("5", "Model-ready", "Scaling, split berbasis waktu, dan array untuk LSTM/GRU/XGBoost/Random Forest."),
+    ]
+    for col, (n, h, d) in zip(st.columns(5), steps):
+        with col:
+            st.markdown(f'<div class="fp-step"><span class="n">{n}</span><div class="h">{esc(h)}</div>'
+                        f'<div class="d">{esc(d)}</div></div>', unsafe_allow_html=True)
+
+    # ── Assessing ────────────────────────────────────────────────────────────
+    raw_path = C["paths"].get("raw")
+    a = assess_raw(str(raw_path)) if raw_path else RAW_SNAPSHOT
+    section("Assessing — masalah kualitas pada data mentah", f"Sumber angka: {a['source']}.")
+    clean_rows = len(tx_all)
+    kpi_row([
+        ("Baris data mentah", num_id(a["rows"]), "raw_dirty_v8.csv", CARD),
+        ("Duplikat dibuang", num_id(a["dup_id"]), pct(a["dup_id"] / a["rows"]) + " dari data mentah", BG_ORANGE),
+        ("Baris data bersih", num_id(clean_rows), "transactions_clean_v8.csv", BG_GREEN),
+        ("Pengguna × hari", num_id(len(dy_all)), "baris fitur harian", BG_PURPLE),
+    ])
+    if a["rows"] - a["dup_id"] != clean_rows:
+        callout(f"Baris mentah − duplikat = {b(num_id(a['rows'] - a['dup_id']))}, sedangkan data bersih berisi "
+                f"{b(num_id(clean_rows))}. Pastikan file mentah dan bersih berasal dari run pipeline yang sama.",
+                "warn", "Periksa konsistensi")
+
+    issues = pd.DataFrame([
+        ("Duplikat transaction_id", a["dup_id"], "Hapus duplikat (drop_duplicates)"),
+        ("Format tanggal campur (DD/MM/YYYY)", a["tgl_slash"], "Standardisasi ke datetime"),
+        ("Nominal berformat teks “Rp …”", a["nominal_rp"], "Konversi ke integer; outlier di-clip pada persentil-99 per kategori"),
+        ("Kategori kosong (NaN)", a["kategori_nan"], "Imputasi → “Tidak Diketahui”"),
+        ("Deskripsi ALLCAPS / lowercase", a["desk_upper"] + a["desk_lower"], "Normalisasi Title Case"),
+    ], columns=["Masalah", "Jumlah baris", "Penanganan"])
+    issues["Persen"] = issues["Jumlah baris"] / a["rows"]
+
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        fig = px.bar(issues.sort_values("Persen"), x="Persen", y="Masalah", orientation="h",
+                     text=issues.sort_values("Persen")["Persen"].map(lambda v: pct(v, 1)),
+                     color_discrete_sequence=[PURPLE])
+        fig.update_xaxes(tickformat=".0%", title="% dari baris data mentah")
+        fig.update_yaxes(title="")
+        fig.update_traces(textposition="outside", cliponaxis=False)
+        show(fig, 340, "Proporsi masalah pada data mentah")
+    with c2:
+        show_df(issues.assign(**{"% data": issues["Persen"].map(lambda v: pct(v, 1)),
+                                 "Jumlah baris": issues["Jumlah baris"].map(num_id)})
+                .drop(columns=["Persen"]), height=300)
+    worst = issues.sort_values("Persen", ascending=False).iloc[0]
+    callout(f"Masalah terbesar: {b(worst['Masalah'])} ({pct(worst['Persen'])} baris). Seluruh masalah dibersihkan "
+            f"secara manual di 02_wrangling_eda.py, bukan memakai dataset siap pakai, sehingga tidak ada nilai "
+            f"kosong maupun duplikat yang lolos ke tahap analisis.")
+
+    # ── Validasi data bersih (dihitung langsung) ─────────────────────────────
+    section("Validasi data bersih", "Dihitung langsung dari file yang sedang dimuat dashboard.")
+    checks: list[tuple] = []
+    n_nan = int(tx_all.isna().sum().sum())
+    checks.append(("Nilai kosong pada transaksi bersih", num_id(n_nan), n_nan == 0))
+    n_dup = int(tx_all["transaction_id"].duplicated().sum())
+    checks.append(("Duplikat transaction_id", num_id(n_dup), n_dup == 0))
+    n_bad = int((tx_all["nominal"] <= 0).sum())
+    checks.append(("Nominal ≤ 0", num_id(n_bad), n_bad == 0))
+    exp_tx = float(tx_all.loc[tx_all["tipe_transaksi"] == "Pengeluaran", "nominal"].sum())
+    exp_dy = float(dy_all["total_pengeluaran_harian"].sum())
+    checks.append(("Total pengeluaran transaksi = total fitur harian",
+                   f"selisih {rp_full(exp_tx - exp_dy)}", abs(exp_tx - exp_dy) < 1))
+    per_user = dy_all.groupby("user_id", observed=True).size()
+    checks.append(("Setiap pengguna punya jumlah hari yang sama",
+                   f"{per_user.min()}–{per_user.max()} hari", per_user.nunique() == 1))
+    cmap = read_optional(C, "categories")
+    if cmap is not None:
+        unmapped = sorted(set(map(str, tx_all["kategori"].cat.categories)) - set(cmap["nama_kategori"]))
+        checks.append(("Semua kategori ada di category_mapping_v8.csv",
+                       "lengkap" if not unmapped else "tidak ada di mapping: " + "; ".join(unmapped),
+                       not unmapped))
+    show_df(pd.DataFrame([(c, r, "✅ Lolos" if ok else "⚠️ Perlu dicek") for c, r, ok in checks],
+                         columns=["Pemeriksaan", "Hasil", "Status"]))
+
+    # ── Kesiapan model ───────────────────────────────────────────────────────
+    section("Kesiapan data untuk model",
+            "Pembagian data berbasis waktu per pengguna — model tidak boleh “melihat masa depan”.")
+    sp = read_optional(C, "split")
+    if sp is not None and {"train_hari", "val_hari", "test_hari"}.issubset(sp.columns):
+        row = sp.iloc[0]
+        segs = [("Train", int(row["train_hari"]), PURPLE, "#FFFFFF"),
+                ("Validation", int(row["val_hari"]), ORANGE, INK),
+                ("Test", int(row["test_hari"]), GREEN, "#FFFFFF")]
+        fig = go.Figure()
+        for name, n, color, tcolor in segs:
+            fig.add_trace(go.Bar(y=["Per pengguna"], x=[n], name=name, orientation="h", marker_color=color,
+                                 text=[f"{name}: {n} hari"], textposition="inside", insidetextanchor="middle",
+                                 textfont=dict(color=tcolor)))
+        fig.update_layout(barmode="stack", showlegend=False)
+        fig.update_yaxes(visible=False)
+        fig.update_xaxes(title="Jumlah hari")
+        show(fig, 170)
+        if {"train_start", "train_end", "val_end", "test_end"}.issubset(sp.columns):
+            st.caption(f"Train {date_id(row['train_start'])} – {date_id(row['train_end'])} · "
+                       f"Validation s.d. {date_id(row['val_end'])} · Test s.d. {date_id(row['test_end'])} "
+                       f"(sama untuk {num_id(len(sp))} pengguna).")
+    else:
+        st.info("split_info_v8.csv tidak ditemukan, visual pembagian data dilewati.")
+    callout("• <b>Target</b> <code>label_defisit_besok</code> dibentuk dari kondisi saldo hari berikutnya dan "
+            "dipisahkan dari matriks fitur X.<br>"
+            "• <b>Split kronologis</b> (bukan acak): train → validation → test pada setiap pengguna.<br>"
+            "• <b>tipe_user</b> (teks) tidak dimasukkan sebagai fitur; dipakai versi numerik "
+            "<code>tipe_user_encoded</code>.", "info", "Pencegahan data leakage")
+
+
+# =============================================================================
+#  HALAMAN 3 — EKSPLORASI PENGELUARAN  (Q1, Q2)
+# =============================================================================
+HOW = {"Total (Rp)": ("sum", "Total (Rp)"),
+       "Jumlah transaksi": ("count", "Jumlah transaksi"),
+       "Rata-rata per transaksi (Rp)": ("mean", "Rata-rata (Rp)")}
+
+
+def page_eksplorasi(C: dict) -> None:
+    tx = C["tx"]
+    hero("Eksplorasi Pengeluaran", "EDA pola waktu, kategori, dan perilaku belanja", badge="Q1 · Q2")
+    ex = tx[tx["tipe_transaksi"] == "Pengeluaran"]
+
+    with st.expander("🎛️ Filter analisis", expanded=True):
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            srs_opts = sorted(map(str, ex["kategori_srs"].unique()))
+            srs_sel = st.multiselect("Kelompok kategori", srs_opts, default=srs_opts)
+        with f2:
+            met_opts = sorted(map(str, ex["metode_pembayaran"].unique()))
+            met_sel = st.multiselect("Metode pembayaran", met_opts, default=met_opts)
+        with f3:
+            how_label = st.radio("Ukuran", list(HOW), key="eks_how")
+    how, how_title = HOW[how_label]
+
+    ex = ex[ex["kategori_srs"].isin(srs_sel) & ex["metode_pembayaran"].isin(met_sel)]
+    if ex.empty:
+        st.warning("Tidak ada transaksi yang cocok dengan filter analisis.")
+        return
+
+    kpi_row([
+        ("Transaksi", num_id(len(ex)), "pada filter ini", CARD),
+        ("Total pengeluaran", rp(float(ex["nominal"].sum())), "", BG_ORANGE),
+        ("Rata-rata / transaksi", rp(float(ex["nominal"].mean())), "", CARD),
+        ("Median / transaksi", rp(float(ex["nominal"].median())), "tengah sebaran nominal", CARD),
+    ])
+    st.write("")
+
+    t_waktu, t_kat, t_perilaku, t_data = st.tabs(["⏱️ Pola waktu", "🏷️ Kategori", "💳 Perilaku", "📄 Data"])
+
+    # ── Pola waktu ───────────────────────────────────────────────────────────
+    with t_waktu:
+        m = agg_value(ex, ["bulan"], how)
+        m["Bulan"] = month_labels(m["bulan"])
+        fig = px.bar(m, x="Bulan", y="nilai", color_discrete_sequence=[PURPLE])
+        fig.update_xaxes(categoryorder="array", categoryarray=list(m["Bulan"]), title="")
+        fig.update_yaxes(tickformat=",.0f", title=how_title)
+        show(fig, 340, f"Tren bulanan — {how_title}")
+
+        dates = pd.Series(pd.date_range(*C["date_range"]))
+        n_users = C["n_users"]
+        dom = avg_per_user_day(ex, "hari_bulan", n_users, dates.dt.day.value_counts().sort_index())
+        dow = avg_per_user_day(ex, "hari_minggu", n_users, dates.dt.dayofweek.value_counts().sort_index())
+
+        c1, c2 = st.columns([3, 2])
         with c1:
-            st.download_button("📥 Daily Features",df_d2.to_csv(index=False).encode(),"daily_filtered.csv","text/csv",use_container_width=True)
+            fig = go.Figure(go.Scatter(x=dom.index, y=dom.values, mode="lines+markers",
+                                       line=dict(color=PURPLE, width=3), marker=dict(size=6),
+                                       hovertemplate="Tanggal %{x}<br>%{y:,.0f}<extra></extra>"))
+            for x0, x1, lab, col in [(0.5, 10.5, "Tgl muda", LIME), (10.5, 21.5, "Tengah bulan", "#FFF3B0"),
+                                     (21.5, 31.5, "Tgl tua", PINK)]:
+                fig.add_vrect(x0=x0, x1=x1, fillcolor=col, opacity=0.35, line_width=0, layer="below",
+                              annotation_text=lab, annotation_position="top left")
+            fig.update_xaxes(title="Tanggal dalam bulan", dtick=3)
+            fig.update_yaxes(tickformat=",.0f", title="Rp per pengguna per hari")
+            show(fig, 340, "Payday effect — belanja rata-rata per hari")
         with c2:
-            df_t2 = filter_df(df_trx,filters) if not df_trx.empty else pd.DataFrame()
-            st.download_button("📥 Transactions",df_t2.to_csv(index=False).encode() if not df_t2.empty else b"","trx_filtered.csv","text/csv",use_container_width=True)
-    close_wrap()
+            fig = px.bar(x=[HARI[i] for i in dow.index], y=dow.values, color_discrete_sequence=[ORANGE])
+            fig.update_traces(marker_color=[RED if i >= 5 else ORANGE for i in dow.index])
+            fig.update_xaxes(title="")
+            fig.update_yaxes(tickformat=",.0f", title="Rp per pengguna per hari")
+            show(fig, 340, "Hari dalam minggu")
+
+        muda, tua = dom.loc[1:10].mean(), dom.loc[22:31].mean()
+        wk, wd = dow.loc[5:6].mean(), dow.loc[0:4].mean()
+        parts = []
+        if tua > 0:
+            parts.append(f"Belanja harian {b(rp(muda))} pada tanggal 1–10 vs {b(rp(tua))} pada tanggal 22–31 "
+                         f"({num_id(muda / tua, 1)}× lipat) — pola {b('payday effect')}: uang cepat keluar setelah gajian.")
+        if wd > 0:
+            diff = wk / wd - 1
+            parts.append(f"Akhir pekan {b(pct(abs(diff)))} {'lebih tinggi' if diff >= 0 else 'lebih rendah'} "
+                         f"daripada hari kerja.")
+        if parts:
+            callout(" ".join(parts))
+
+    # ── Kategori ─────────────────────────────────────────────────────────────
+    with t_kat:
+        tree = tidy(ex.groupby(["kategori_srs", "kategori"], observed=True)["nominal"].sum().reset_index())
+        fig = px.treemap(tree, path=[px.Constant("Semua kategori"), "kategori_srs", "kategori"], values="nominal",
+                         color="kategori_srs", color_discrete_map={**SRS_COLORS, "(?)": CARD})
+        fig.update_traces(root_color=CARD, textinfo="label+percent root")
+        show(fig, 430, "Komposisi pengeluaran (klik untuk memperbesar)")
+
+        c1, c2 = st.columns(2)
+        with c1:
+            n_top = st.slider("Tampilkan N kategori teratas", 5, 20, 10, key="eks_topn")
+            top = tidy(agg_value(ex, ["kategori", "kategori_srs"], how).nlargest(n_top, "nilai").sort_values("nilai"))
+            fig = px.bar(top, x="nilai", y="kategori", orientation="h", color="kategori_srs",
+                         color_discrete_map=SRS_COLORS)
+            fig.update_xaxes(tickformat=",.0f", title=how_title)
+            fig.update_yaxes(title="")
+            show(fig, 120 + 30 * n_top, f"{n_top} kategori teratas — {how_title}")
+        with c2:
+            nw = ex.groupby(["tipe_user", "needs_wants"], observed=True)["nominal"].sum().reset_index()
+            nw["share"] = nw["nominal"] / nw.groupby("tipe_user", observed=True)["nominal"].transform("sum")
+            nw = tidy(nw)
+            order = (nw[nw["needs_wants"] == "Wants"].sort_values("share")["tipe_user"].tolist())
+            fig = px.bar(nw, x="share", y="tipe_user", color="needs_wants", orientation="h",
+                         color_discrete_map={"Needs": GREEN, "Wants": ORANGE},
+                         category_orders={"tipe_user": order, "needs_wants": ["Needs", "Wants"]})
+            fig.update_xaxes(tickformat=".0%", title="Porsi belanja")
+            fig.update_yaxes(title="")
+            show(fig, 120 + 30 * 10, "Needs vs Wants per tipe pengguna")
+
+        total = ex["nominal"].sum()
+        by_cat = ex.groupby("kategori", observed=True)["nominal"].sum().sort_values(ascending=False)
+        wants_by_cat = (ex[ex["needs_wants"] == "Wants"].groupby("kategori", observed=True)["nominal"].sum()
+                        .sort_values(ascending=False))
+        msg = (f"{b(by_cat.index[0])} adalah pos terbesar ({pct(by_cat.iloc[0] / total)} dari total nominal).")
+        if len(wants_by_cat) >= 3:
+            msg += (f" Untuk belanja keinginan (Wants), tiga teratas adalah {b(wants_by_cat.index[0])}, "
+                    f"{b(wants_by_cat.index[1])}, dan {b(wants_by_cat.index[2])} "
+                    f"({pct(wants_by_cat.head(3).sum() / wants_by_cat.sum(), 0)} dari seluruh Wants).")
+        wsh = nw[nw["needs_wants"] == "Wants"].sort_values("share", ascending=False)
+        if len(wsh):
+            msg += f" Porsi Wants tertinggi ada pada {b(wsh.iloc[0]['tipe_user'])} ({pct(wsh.iloc[0]['share'])})."
+        callout(msg)
+
+    # ── Perilaku ─────────────────────────────────────────────────────────────
+    with t_perilaku:
+        c1, c2 = st.columns(2)
+        with c1:
+            mm = vcounts(ex["metode_pembayaran"])
+            fig = px.pie(values=mm.values, names=mm.index.astype(str), hole=0.55,
+                         color_discrete_sequence=PALETTE)
+            fig.update_traces(textinfo="percent+label", textposition="outside")
+            fig.update_layout(showlegend=False)
+            show(fig, 360, "Metode pembayaran (jumlah transaksi)")
+        with c2:
+            pl = (ex.assign(is_paylater=(ex["metode_pembayaran"] == "Paylater"))
+                  .groupby("tipe_user", observed=True)["is_paylater"].mean().sort_values())
+            fig = px.bar(x=pl.values, y=pl.index.astype(str), orientation="h", color_discrete_sequence=[RED],
+                         text=[pct(v) for v in pl.values])
+            fig.update_xaxes(tickformat=".0%", title="Transaksi memakai Paylater")
+            fig.update_yaxes(title="")
+            fig.update_traces(textposition="outside", cliponaxis=False)
+            show(fig, 360, "Penggunaan Paylater per tipe pengguna")
+
+        pem = ex[ex["kategori"].isin(PEMICU_OVERSPENDING)]
+        if len(pem):
+            n_per_tipe = tx.groupby("tipe_user", observed=True)["user_id"].nunique()
+            n_per_tipe.index = n_per_tipe.index.astype(str)
+            pt = tidy(pem.groupby(["tipe_user", "kategori"], observed=True)["nominal"].sum().reset_index())
+            pt["per_pengguna"] = pt["nominal"] / pt["tipe_user"].map(n_per_tipe.to_dict())
+            fig = px.bar(pt, x="tipe_user", y="per_pengguna", color="kategori", barmode="stack",
+                         color_discrete_sequence=PALETTE)
+            fig.update_xaxes(title="", tickangle=-15)
+            fig.update_yaxes(tickformat=",.0f", title="Rp per pengguna")
+            show(fig, 380, "Kategori pemicu overspending — belanja per pengguna")
+            tot_t = pt.groupby("tipe_user")["per_pengguna"].sum().sort_values(ascending=False)
+            top_pem = pt.groupby("kategori")["nominal"].sum().sort_values(ascending=False)
+            pl_top = pl.sort_values(ascending=False)
+            callout(f"Pemicu overspending terbesar: {b(top_pem.index[0])}. Tipe {b(tot_t.index[0])} menghabiskan "
+                    f"{b(rp(tot_t.iloc[0]))} per pengguna pada empat kategori pemicu, dan tipe "
+                    f"{b(pl_top.index[0])} paling sering memakai Paylater ({pct(pl_top.iloc[0])} transaksi).")
+        else:
+            st.info("Tidak ada transaksi kategori pemicu pada filter ini.")
+
+    # ── Data ─────────────────────────────────────────────────────────────────
+    with t_data:
+        q = st.text_input("Cari deskripsi transaksi", "", key="eks_q")
+        view = ex[ex["deskripsi"].astype(str).str.contains(q, case=False, regex=False, na=False)] if q else ex
+        st.caption(f"{num_id(len(view))} transaksi cocok · tabel menampilkan 300 terbaru.")
+        cols = ["tanggal_transaksi", "user_id", "tipe_user", "kategori", "deskripsi", "nominal",
+                "metode_pembayaran", "needs_wants"]
+        show_df(view.sort_values("tanggal_transaksi", ascending=False).head(300)[cols], height=360)
+        td = vcounts(view["deskripsi"]).head(10).sort_values()
+        if len(td):
+            fig = px.bar(x=td.values, y=td.index.astype(str), orientation="h", color_discrete_sequence=[TEAL])
+            fig.update_xaxes(title="Frekuensi")
+            fig.update_yaxes(title="")
+            show(fig, 380, "10 deskripsi transaksi terbanyak")
 
 
-# ══════════════════════════════════════════════════════════════
-#  MAIN
-# ══════════════════════════════════════════════════════════════
+# =============================================================================
+#  HALAMAN 4 — RISIKO DEFISIT  (Q3)
+# =============================================================================
+def page_risiko(C: dict) -> None:
+    dy = C["dy"]
+    hero("Risiko Defisit", "Kapan dan pada siapa risiko defisit meningkat?", badge="Q3")
+    base = float(dy["label_defisit_besok"].mean())
+
+    dim = st.radio("Dimensi analisis", ["Fase bulan", "Hari dalam minggu", "Bulan", "Tipe pengguna"],
+                   horizontal=True, key="risk_dim")
+    if dim == "Fase bulan":
+        g = dy.groupby("fase", observed=True)["label_defisit_besok"].agg(["mean", "size"]).reset_index()
+        g["label"] = g["fase"].astype(str)
+    elif dim == "Hari dalam minggu":
+        g = dy.groupby("hari_dalam_minggu")["label_defisit_besok"].agg(["mean", "size"]).reset_index()
+        g["label"] = g["hari_dalam_minggu"].map(lambda i: HARI[int(i)])
+    elif dim == "Bulan":
+        g = dy.groupby("bulan_ts")["label_defisit_besok"].agg(["mean", "size"]).reset_index()
+        g["label"] = month_labels(g["bulan_ts"])
+    else:
+        g = (dy.groupby("tipe_user", observed=True)["label_defisit_besok"].agg(["mean", "size"])
+             .reset_index().sort_values("mean"))
+        g["label"] = g["tipe_user"].astype(str)
+    g = g[["label", "mean", "size"]].reset_index(drop=True)
+
+    fig = px.bar(g, x="label", y="mean", text=g["mean"].map(lambda v: pct(v, 0)))
+    fig.update_traces(marker_color=[RED if v > base else GREEN for v in g["mean"]],
+                      textposition="outside", cliponaxis=False)
+    fig.add_hline(y=base, line_dash="dash", line_color=INK,
+                  annotation_text=f"Rata-rata {pct(base)}", annotation_position="top left")
+    fig.update_xaxes(categoryorder="array", categoryarray=list(g["label"]), title="", tickangle=-15 if dim == "Tipe pengguna" else 0)
+    fig.update_yaxes(tickformat=".0%", title="Hari berisiko defisit", range=[0, min(1.15, g["mean"].max() * 1.2 + 0.05)])
+    show(fig, 380, f"Risiko defisit besok menurut {dim.lower()}")
+
+    hi, lo = g.loc[g["mean"].idxmax()], g.loc[g["mean"].idxmin()]
+    gap = float(hi["mean"] - lo["mean"])
+    msg = (f"Risiko tertinggi: {b(hi['label'])} ({pct(hi['mean'])}); terendah: {b(lo['label'])} "
+           f"({pct(lo['mean'])}) — selisih {b(pp(gap))}.")
+    msg += (" Selisihnya kecil, jadi dimensi ini bukan pembeda risiko yang kuat."
+            if gap < 0.05 else " Selisih yang lebar menandakan dimensi ini pembeda risiko yang penting.")
+    callout(msg, "warn" if gap >= 0.05 else "info")
+
+    # ── Heatmap tipe × fase ──────────────────────────────────────────────────
+    section("Tipe pengguna × fase bulan", "Persentase hari berisiko defisit pada setiap kombinasi.")
+    hm = dy.groupby(["tipe_user", "fase"], observed=True)["label_defisit_besok"].mean().unstack("fase")
+    hm = hm.reindex(columns=[c for c in FASE_ORDER if c in hm.columns])
+    hm = hm.loc[hm.mean(axis=1).sort_values().index]
+    hm.index = hm.index.astype(str)
+    hm.columns = [str(c) for c in hm.columns]
+    fig = px.imshow(hm, text_auto=".0%", aspect="auto", zmin=0, zmax=1,
+                    color_continuous_scale=[[0, "#FFFFFF"], [1, RED]])
+    fig.update_layout(coloraxis_showscale=False)
+    show(fig, 120 + 48 * len(hm))
+
+    # ── Ambang Early Warning (interaktif) ────────────────────────────────────
+    section("Ambang Early Warning", "Geser ambang days_to_ruin untuk melihat dampaknya pada jumlah peringatan dan ketepatannya.")
+    s1, s2 = st.columns(2)
+    with s1:
+        bahaya = st.slider("Batas BAHAYA — days_to_ruin ≤ (hari)", 0, 30, DTR_BAHAYA, key="risk_bahaya")
+    with s2:
+        waspada = st.slider("Batas WASPADA — days_to_ruin ≤ (hari)", 0, 60, DTR_WASPADA, key="risk_waspada")
+    waspada = max(waspada, bahaya)
+
+    tmp = pd.DataFrame({"status": status_series(dy["days_to_ruin"], bahaya, waspada),
+                        "label": dy["label_defisit_besok"].to_numpy()})
+    summ = tmp.groupby("status", observed=True)["label"].agg(["size", "mean"]).reset_index()
+    summ["share"] = summ["size"] / len(tmp)
+    summ = tidy(summ)
+
+    c1, c2 = st.columns(2)
+    with c1:
+        fig = px.bar(summ, x="status", y="share", color="status", color_discrete_map=STATUS_COLORS,
+                     text=summ["share"].map(lambda v: pct(v)))
+        fig.update_traces(textposition="outside", cliponaxis=False)
+        fig.update_layout(showlegend=False)
+        fig.update_xaxes(title="")
+        fig.update_yaxes(tickformat=".0%", title="Porsi hari-pengguna", range=[0, 1.1])
+        show(fig, 340, "Seberapa sering peringatan muncul")
+    with c2:
+        fig = px.bar(summ, x="status", y="mean", color="status", color_discrete_map=STATUS_COLORS,
+                     text=summ["mean"].map(lambda v: pct(v)))
+        fig.update_traces(textposition="outside", cliponaxis=False)
+        fig.update_layout(showlegend=False)
+        fig.update_xaxes(title="")
+        fig.update_yaxes(tickformat=".0%", title="Benar defisit keesokan hari", range=[0, 1.1])
+        show(fig, 340, "Seberapa tepat peringatan itu")
+
+    d = summ.set_index("status")
+    bits = [f"{b(s)}: muncul di {pct(d.loc[s, 'share'])} hari, {pct(d.loc[s, 'mean'])} di antaranya benar defisit "
+            f"keesokan hari" for s in ("BAHAYA", "WASPADA", "AMAN") if s in d.index]
+    callout("; ".join(bits) + ". Ambang yang lebih longgar menangkap lebih banyak risiko tetapi menambah jumlah "
+            "peringatan — pertimbangan utama untuk menghindari <i>notification fatigue</i>.")
+
+    dtr = dy.loc[(dy["days_to_ruin"] > 0) & (dy["days_to_ruin"] < 9999), "days_to_ruin"].clip(upper=120)
+    if len(dtr):
+        fig = px.histogram(x=dtr, nbins=60, color_discrete_sequence=[PURPLE])
+        fig.add_vline(x=bahaya, line_dash="dash", line_color=RED, annotation_text="Bahaya")
+        fig.add_vline(x=waspada, line_dash="dash", line_color=ORANGE, annotation_text="Waspada")
+        fig.update_xaxes(title="days_to_ruin (hari, dipotong di 120)")
+        fig.update_yaxes(title="Jumlah hari-pengguna")
+        show(fig, 320, "Sebaran days_to_ruin (hanya saldo positif)")
+        st.caption(f"{pct(float((dy['days_to_ruin'] <= 0).mean()))} hari-pengguna sudah berada di saldo ≤ 0 "
+                   f"(days_to_ruin = 0) dan tidak ditampilkan pada histogram.")
+
+
+# =============================================================================
+#  HALAMAN 5 — EARLY WARNING PER PENGGUNA  (Q5)
+# =============================================================================
+STATUS_INFO = {
+    "BAHAYA": (RED, "#FFD6D6", f"Saldo sudah ≤ 0 atau diperkirakan habis dalam ≤ {DTR_BAHAYA} hari.",
+               ["Pangkas belanja Wants minimal 50% pekan ini.",
+                "Tunda Harbolnas/Flash Sale dan top-up game.",
+                "Prioritaskan makan pokok dan transportasi.",
+                "Hindari Paylater untuk menutup kekurangan."]),
+    "WASPADA": (ORANGE, BG_ORANGE, f"Saldo diperkirakan habis dalam {DTR_BAHAYA + 1}–{DTR_WASPADA} hari.",
+                ["Kurangi belanja Wants sekitar 30%.",
+                 "Pantau saldo setiap hari.",
+                 "Tunda pembelian non-esensial.",
+                 "Cari tambahan pemasukan bila memungkinkan."]),
+    "AMAN": (GREEN, BG_GREEN, f"Saldo diperkirakan cukup lebih dari {DTR_WASPADA} hari.",
+             ["Pertahankan pola belanja saat ini.",
+              "Sisihkan minimal 10% pemasukan untuk tabungan.",
+              "Bangun dana darurat sebelum berinvestasi."]),
+}
+
+
+def page_early_warning(C: dict) -> None:
+    dy, tx = C["dy"], C["tx"]
+    hero("Early Warning", "Status keuangan per pengguna dan proyeksi saldo 30 hari ke depan", badge="Q5")
+
+    users = sorted(map(str, dy["user_id"].unique()))
+    utype = (dy.drop_duplicates("user_id").assign(user_id=lambda d: d["user_id"].astype(str))
+             .set_index("user_id")["tipe_user"].astype(str).to_dict())
+    uid = st.selectbox("Pilih pengguna", users, format_func=lambda x: f"{x} · {utype.get(x, '')}")
+    u = dy[dy["user_id"] == uid].sort_values("tanggal_transaksi")
+    if len(u) < 7:
+        st.info("Riwayat pengguna kurang dari 7 hari pada rentang tanggal ini.")
+        return
+
+    last = u.iloc[-1]
+    last_date = pd.Timestamp(last["tanggal_transaksi"])
+    saldo, dtr = float(last["saldo_berjalan"]), float(last["days_to_ruin"])
+    status = status_of(dtr)
+    color, bg, status_text, tips = STATUS_INFO[status]
+    w7 = u.tail(7)
+    wants7 = float(w7["total_wants_harian"].sum() / max(w7["total_pengeluaran_harian"].sum(), 1))
+
+    st.markdown(f'<div class="fp-status" style="background:{bg}"><b style="color:{color}">{status}</b> '
+                f'· per {esc(date_id(last_date))}<br>{esc(status_text)}</div>', unsafe_allow_html=True)
+    kpi_row([
+        ("Saldo kumulatif", rp(saldo), "pemasukan − pengeluaran sejak awal periode", BG_GREEN if saldo > 0 else PINK),
+        ("Days to ruin", "0 hari (defisit)" if saldo <= 0 else f"{num_id(dtr)} hari", "saldo ÷ rata-rata belanja 7 hari", CARD),
+        ("Rasio Wants 7 hari", pct(wants7), "porsi belanja keinginan", BG_ORANGE),
+        ("Rata-rata belanja 7 hari", rp(float(last["rolling_mean_7d"])), "per hari", CARD),
+    ])
+
+    # ── Skenario what-if ─────────────────────────────────────────────────────
+    section("Proyeksi 30 hari & skenario",
+            "Proyeksi linier sederhana dari rata-rata historis — bukan keluaran model LSTM. "
+            "Gunakan untuk membandingkan skenario penghematan.")
+    w30, w90 = u.tail(30), u.tail(90)
+    base_exp = float(w30["total_pengeluaran_harian"].mean())
+    wants_share = float(w30["total_wants_harian"].sum() / max(w30["total_pengeluaran_harian"].sum(), 1))
+    inc_hist = float(w90["total_pemasukan_harian"].mean())
+    default_budget = int(round((inc_hist * HORIZON_DAYS if inc_hist > 0 else base_exp * HORIZON_DAYS) / 100_000) * 100_000)
+
+    s1, s2, s3 = st.columns(3)
+    with s1:
+        cut = st.slider("Kurangi belanja Wants (%)", 0, 60, 30, 5, key="ew_cut") / 100
+    with s2:
+        inc_mode = st.radio("Asumsi pemasukan", ["Rata-rata 90 hari terakhir", "Tanpa pemasukan baru"], key="ew_inc")
+    with s3:
+        budget = st.number_input("Anggaran 30 hari (Rp)", min_value=0, value=max(default_budget, 0),
+                                 step=100_000, key=f"ew_budget_{uid}")
+    inc_daily = inc_hist if inc_mode.startswith("Rata-rata") else 0.0
+    exp_cut = base_exp * (1 - wants_share * cut)
+    days = np.arange(1, HORIZON_DAYS + 1)
+    future = pd.date_range(last_date + pd.Timedelta(days=1), periods=HORIZON_DAYS)
+    s_base = saldo + days * (inc_daily - base_exp)
+    s_cut = saldo + days * (inc_daily - exp_cut)
+
+    if len(u) > 30:
+        hist = st.slider("Riwayat yang ditampilkan (hari)", 30, len(u), min(90, len(u)), key="ew_hist")
+    else:
+        hist = len(u)
+    h = u.tail(hist)
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=h["tanggal_transaksi"], y=h["saldo_berjalan"], name="Saldo historis",
+                             mode="lines", line=dict(color=INK, width=3)))
+    fig.add_trace(go.Scatter(x=future, y=s_base, name="Proyeksi (pola saat ini)", mode="lines",
+                             line=dict(color=ORANGE, width=3, dash="dash")))
+    if cut > 0:
+        fig.add_trace(go.Scatter(x=future, y=s_cut, name=f"Proyeksi (Wants −{int(cut * 100)}%)", mode="lines",
+                                 line=dict(color=GREEN, width=3, dash="dash")))
+    fig.add_hline(y=0, line_dash="dot", line_color=RED, annotation_text="Rp 0", annotation_position="bottom left")
+    fig.add_shape(type="line", x0=last_date, x1=last_date, y0=0, y1=1, yref="paper",
+                  line=dict(color=GRAY, dash="dot"))
+    fig.add_annotation(x=last_date, y=1, yref="paper", text="Hari ini", showarrow=False, yanchor="bottom")
+    fig.update_yaxes(tickformat=",.0f", title="Saldo kumulatif (Rp)")
+    fig.update_xaxes(title="")
+    show(fig, 400, f"Saldo {uid}: riwayat dan proyeksi {HORIZON_DAYS} hari")
+
+    proj_spend = base_exp * HORIZON_DAYS
+    over = proj_spend / budget - 1 if budget > 0 else None
+    if over is not None and over > 0:
+        callout(f"Proyeksi pengeluaran {HORIZON_DAYS} hari: {b(rp_full(proj_spend))} — {b(pct(over))} di atas "
+                f"anggaran {b(rp_full(budget))}. Early Warning aktif.", "bad", "Peringatan anggaran")
+    elif over is not None:
+        callout(f"Proyeksi pengeluaran {HORIZON_DAYS} hari: {b(rp_full(proj_spend))}, masih dalam anggaran "
+                f"{b(rp_full(budget))} (sisa {b(pct(-over))}).", "good", "Anggaran aman")
+
+    parts = []
+    neg_base = np.where(s_base < 0)[0]
+    if saldo <= 0:
+        parts.append(f"Saldo kumulatif sudah negatif ({b(rp(saldo))}); pada pola saat ini proyeksinya "
+                     f"{'membaik' if s_base[-1] > saldo else 'memburuk'} menjadi {b(rp(float(s_base[-1])))} pada hari ke-{HORIZON_DAYS}.")
+    elif len(neg_base):
+        parts.append(f"Pada pola saat ini saldo diproyeksikan negatif mulai {b('hari ke-' + str(neg_base[0] + 1))} "
+                     f"({esc(date_id(future[neg_base[0]]))}).")
+    else:
+        parts.append("Pada pola saat ini saldo tetap positif selama 30 hari.")
+    if cut > 0:
+        parts.append(f"Memangkas Wants {b(str(int(cut * 100)) + '%')} menghemat sekitar "
+                     f"{b(rp((base_exp - exp_cut) * HORIZON_DAYS))} dalam 30 hari.")
+    callout(" ".join(parts))
+
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        recent = tx[(tx["user_id"] == uid) & (tx["tipe_transaksi"] == "Pengeluaran")
+                    & (tx["tanggal_transaksi"] > last_date - pd.Timedelta(days=30))]
+        top = tidy(recent.groupby("kategori", observed=True)["nominal"].sum().nlargest(6)
+                   .sort_values().reset_index())
+        if len(top):
+            fig = px.bar(top, x="nominal", y="kategori", orientation="h", color_discrete_sequence=[PURPLE])
+            fig.update_xaxes(tickformat=",.0f", title="Rp")
+            fig.update_yaxes(title="")
+            show(fig, 320, "Pos pengeluaran terbesar (30 hari terakhir)")
+    with c2:
+        st.markdown("**Rekomendasi**")
+        for t in tips:
+            st.markdown(f"- {t}")
+
+
+# =============================================================================
+#  HALAMAN 6 — EVALUASI MODEL  (Q4)
+# =============================================================================
+METRICS = ["AUC-ROC", "F1-Score", "Recall", "Precision", "Accuracy", "Avg Precision"]
+
+
+def page_model(C: dict) -> None:
+    hero("Evaluasi Model", "Perbandingan LSTM, GRU, XGBoost, dan Random Forest", badge="Q4")
+    mr = read_optional(C, "model_results")
+    if mr is None or "Model" not in mr.columns:
+        st.warning("model_results.csv tidak ditemukan. Jalankan 04_modeling.py terlebih dahulu.")
+        return
+    metrics = [m for m in METRICS if m in mr.columns]
+    st.caption("Sumber: model_results.csv — metrik dihitung pada **validation set** dengan threshold 0,5. "
+               "Hasil test-set dicetak oleh 04_modeling.py tetapi tidak tersimpan ke CSV.")
+
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        models = st.multiselect("Model yang dibandingkan", list(mr["Model"]), default=list(mr["Model"]), key="mdl_sel")
+    with c2:
+        metric = st.radio("Metrik utama", metrics, horizontal=True, key="mdl_metric")
+    df = mr[mr["Model"].isin(models)].copy()
+    if df.empty:
+        st.info("Pilih minimal satu model.")
+        return
+    df = df.sort_values(metric, ascending=False).reset_index(drop=True)
+    df["Label"] = df["Model"].map(lambda m: f"{m} ★" if m == PRODUCTION_MODEL else m)
+
+    fig = px.bar(df, x="Label", y=metric, text=df[metric].map(lambda v: num_id(v, 3)))
+    fig.update_traces(marker_color=[PURPLE if m == PRODUCTION_MODEL else "#9CA3AF" for m in df["Model"]],
+                      textposition="outside", cliponaxis=False)
+    if metric == "Accuracy":
+        fig.add_hline(y=ACCURACY_TARGET, line_dash="dash", line_color=RED,
+                      annotation_text=f"Target ≥ {int(ACCURACY_TARGET * 100)}%", annotation_position="top left")
+    lo = max(0.0, float(df[metric].min()) - 0.1)
+    fig.update_yaxes(range=[lo, 1.05], title=metric)
+    fig.update_xaxes(title="")
+    show(fig, 360, f"{metric} per model  (★ = model produksi)")
+
+    best = df.iloc[0]
+    msg = f"Peringkat 1 pada {b(metric)}: {b(best['Model'])} ({num_id(best[metric], 3)})."
+    if PRODUCTION_MODEL in set(df["Model"]) and best["Model"] != PRODUCTION_MODEL:
+        prod = df[df["Model"] == PRODUCTION_MODEL].iloc[0]
+        msg += (f" Model produksi {b(PRODUCTION_MODEL)} berada {num_id(abs(best[metric] - prod[metric]), 3)} "
+                f"di bawahnya.")
+    callout(msg)
+
+    g1, g2 = st.columns(2)
+    with g1:
+        mat = df.set_index("Model")[metrics]
+        zmin = max(0.0, np.floor(float(mat.values.min()) * 20) / 20)
+        fig = px.imshow(mat, text_auto=".3f", aspect="auto", zmin=zmin, zmax=1,
+                        color_continuous_scale=[[0, "#FFFFFF"], [1, PURPLE]])
+        fig.update_layout(coloraxis_showscale=False)
+        show(fig, 120 + 55 * len(mat), "Scorecard semua metrik")
+    with g2:
+        if {"Recall", "Precision"}.issubset(df.columns):
+            fig = px.scatter(df, x="Recall", y="Precision", text="Model",
+                             size=df["F1-Score"] if "F1-Score" in df.columns else None, size_max=30,
+                             color_discrete_sequence=[PURPLE])
+            fig.update_traces(textposition="top center")
+            fig.update_xaxes(range=[0.7, 1.0])
+            fig.update_yaxes(range=[0.7, 1.0])
+            show(fig, 120 + 55 * len(mat), "Recall vs Precision (ukuran = F1)")
+
+    if "Accuracy" in mr.columns:
+        section("Pemeriksaan target Project Brief", "Side Quest: akurasi minimal 85%. MAE ≤ 0,02 tidak tercatat di model_results.csv.")
+        chk = mr[["Model", "Accuracy"]].copy()
+        chk["Target ≥ 85%"] = chk["Accuracy"].map(lambda v: "✅ Terpenuhi" if v >= ACCURACY_TARGET else "❌ Belum")
+        chk["Akurasi"] = chk["Accuracy"].map(lambda v: pct(v))
+        chk["Model"] = chk["Model"].map(lambda m: f"{m} ★" if m == PRODUCTION_MODEL else m)
+        show_df(chk[["Model", "Akurasi", "Target ≥ 85%"]])
+        prod = mr[mr["Model"] == PRODUCTION_MODEL]
+        if len(prod) and float(prod["Accuracy"].iloc[0]) < ACCURACY_TARGET:
+            callout(f"Akurasi {b(PRODUCTION_MODEL)} pada validation set adalah {b(pct(float(prod['Accuracy'].iloc[0])))}, "
+                    f"di bawah target {int(ACCURACY_TARGET * 100)}%.", "warn", "Target belum tercapai")
+
+    # ── Feature importance ───────────────────────────────────────────────────
+    section("Fitur paling berpengaruh (XGBoost)", "Kontribusi total gain tiap fitur, dibaca dari model_xgb.json.")
+    mp, sp = C["paths"].get("model"), C["paths"].get("scaled")
+    if mp and sp:
+        imp = xgb_gain_importance(str(mp), scaled_feature_names(str(sp)))
+        if imp is None:
+            st.info("Jumlah fitur pada model tidak cocok dengan scaled_full_v8.csv.")
+        else:
+            n = st.slider("Tampilkan N fitur teratas", 5, 20, 12, key="mdl_topn")
+            top = imp.head(n).sort_values("Gain")
+            fig = px.bar(top, x="Gain", y="Fitur", orientation="h", color_discrete_sequence=[PURPLE],
+                         text=top["Gain"].map(lambda v: pct(v)))
+            fig.update_traces(textposition="outside", cliponaxis=False)
+            fig.update_xaxes(tickformat=".0%", title="Porsi total gain")
+            fig.update_yaxes(title="")
+            show(fig, 120 + 28 * n)
+            share = float(imp["Gain"].iloc[0])
+            if share >= 0.5:
+                callout(f"{b(imp['Fitur'].iloc[0])} menyumbang {b(pct(share))} dari total gain — satu fitur mendominasi. "
+                        f"Fitur <code>days_to_ruin</code> diturunkan dari saldo dan rata-rata belanja 7 hari, komponen yang "
+                        f"juga dipakai mendefinisikan label. Karena itu skor tinggi perlu ditafsirkan hati-hati: model "
+                        f"dapat sebagian besar menirukan aturan label, bukan mempelajari pola perilaku.", "warn", "Catatan interpretasi")
+            else:
+                callout(f"Fitur teratas: {b(imp['Fitur'].iloc[0])} ({pct(share)} dari total gain).")
+    else:
+        st.info("Butuh model_xgb.json dan scaled_full_v8.csv untuk menampilkan feature importance.")
+
+
+# =============================================================================
+#  HALAMAN 7 — A/B TESTING  (Q5)
+# =============================================================================
+def p_text(p: float) -> str:
+    return "< 0,001" if p < 0.001 else num_id(p, 3)
+
+
+def d_label(d: float) -> str:
+    a = abs(d)
+    return "dapat diabaikan" if a < 0.2 else "kecil" if a < 0.5 else "sedang" if a < 0.8 else "besar"
+
+
+def page_ab(C: dict) -> None:
+    hero("A/B Testing", "Pengaruh Early Warning System terhadap defisit rate", badge="Q5 · Simulasi")
+    ab = read_optional(C, "ab_results")
+    need = {"group", "n", "deficit_rate"}
+    if ab is None or not need.issubset(ab.columns) or len(ab) < 2:
+        st.warning("ab_testing_results.csv tidak ditemukan atau tidak lengkap. Jalankan 05_ab_testing.py.")
+        return
+    A = ab[ab["group"].str.contains("kontrol")].iloc[0]
+    Bv = ab[ab["group"].str.contains("treatment")].iloc[0]
+    ra, rb, na, nb = float(A["deficit_rate"]), float(Bv["deficit_rate"]), int(A["n"]), int(Bv["n"])
+    delta = ra - rb
+
+    with st.expander("📖 Desain eksperimen", expanded=False):
+        st.markdown(
+            "- **H0**: tidak ada beda defisit rate antara Grup A dan B · **H1**: Grup B (dengan Early Warning) lebih rendah.\n"
+            "- **Grup A (kontrol)**: tanpa peringatan · **Grup B (treatment)**: peringatan aktif saat probabilitas defisit melewati ambang.\n"
+            "- **Unit**: hari-pengguna pada periode test (pengguna dibagi dua secara acak).\n"
+            "- **Metrik utama**: proporsi hari defisit · uji: Chi-square; pembanding: uji-t pengeluaran & Cohen's d.")
+
+    kpi_row([
+        ("Defisit rate A (kontrol)", pct(ra), f"n = {num_id(na)} hari-pengguna", PINK),
+        ("Defisit rate B (treatment)", pct(rb), f"n = {num_id(nb)} hari-pengguna", BG_GREEN),
+        ("Penurunan absolut", pp(delta), "A − B", CARD),
+        ("Penurunan relatif", pct(delta / ra) if ra else "–", "relative risk reduction", BG_PURPLE),
+    ])
+    st.write("")
+
+    ci = lambda p, n: 1.96 * np.sqrt(p * (1 - p) / n)
+    dfp = pd.DataFrame({"Grup": ["A (kontrol)", "B (Early Warning)"], "Rate": [ra, rb], "CI": [ci(ra, na), ci(rb, nb)]})
+    fig = px.bar(dfp, x="Grup", y="Rate", error_y="CI", color="Grup",
+                 color_discrete_map={"A (kontrol)": RED, "B (Early Warning)": GREEN},
+                 text=dfp["Rate"].map(lambda v: pct(v)))
+    fig.update_traces(textposition="inside")
+    fig.update_layout(showlegend=False)
+    fig.update_xaxes(title="")
+    fig.update_yaxes(tickformat=".0%", title="Defisit rate", range=[0, max(ra, rb) * 1.3])
+    show(fig, 360, "Defisit rate per grup (±95% CI)")
+    st.caption("CI dihitung dengan asumsi observasi independen. Karena satu pengguna menyumbang banyak hari, "
+               "selang kepercayaan sebenarnya lebih lebar.")
+
+    section("Uji statistik")
+    rows = []
+    if "chi2_p" in ab.columns and pd.notna(A["chi2_p"]):
+        p = float(A["chi2_p"])
+        rows.append(("Chi-square (proporsi defisit)", f"p {p_text(p)}", "Signifikan" if p < 0.05 else "Tidak signifikan"))
+    if "ttest_p" in ab.columns and pd.notna(A["ttest_p"]):
+        p = float(A["ttest_p"])
+        rows.append(("Uji-t Welch (rata-rata pengeluaran harian)", f"p {p_text(p)}",
+                     "Signifikan" if p < 0.05 else "Tidak signifikan"))
+    if "cohens_d" in ab.columns and pd.notna(A["cohens_d"]):
+        d = float(A["cohens_d"])
+        rows.append(("Cohen's d (pengeluaran)", num_id(d, 3), f"Efek {d_label(d)}"))
+    if rows:
+        show_df(pd.DataFrame(rows, columns=["Uji", "Hasil", "Kesimpulan"]))
+
+    callout(f"Defisit rate Grup A {b(pct(ra))} vs Grup B {b(pct(rb))}: selisih {b(pp(delta))}.", "info", "Hasil")
+    p_t = float(A["ttest_p"]) if "ttest_p" in ab.columns and pd.notna(A["ttest_p"]) else None
+    t_note = ""
+    if p_t is not None:
+        t_note = (" Uji-t pada pengeluaran harian tidak signifikan, artinya peringatan tidak mengubah besar belanja pada simulasi ini."
+                  if p_t >= 0.05 else " Uji-t menunjukkan perbedaan pengeluaran yang signifikan antar grup.")
+    callout(f"Hasil ini berasal dari <b>simulasi</b>. Pada 05_ab_testing.py, untuk Grup B setiap hari yang memicu "
+            f"peringatan dan berlabel defisit dibalik menjadi aman dengan peluang {b(pct(AB_EFFECT_SIZE, 0))} "
+            f"(<i>effect size</i> yang diasumsikan). Penurunan defisit rate adalah konsekuensi asumsi tersebut, bukan "
+            f"bukti bahwa peringatan mengubah perilaku.{t_note} Pembuktian efektivitas membutuhkan uji coba pada "
+            f"pengguna nyata.", "warn", "Cara membaca hasil")
+
+
+# =============================================================================
+#  HALAMAN 8 — DATA DICTIONARY
+# =============================================================================
+def page_dictionary(C: dict) -> None:
+    hero("Data Dictionary", "Dokumentasi kolom dan kelompok fitur dataset FinPredict", badge="Dokumentasi")
+    dd = read_optional(C, "dictionary")
+    if dd is None:
+        st.warning("data_dictionary_v8.csv tidak ditemukan. Jalankan 06_data_dictionary.py.")
+    else:
+        kpi_row([("Total entri", num_id(len(dd)), "kolom terdokumentasi", BG_PURPLE),
+                 ("File data", num_id(dd["file"].nunique()) if "file" in dd.columns else "–", "tercakup", CARD),
+                 ("Kolom fitur harian", num_id(int((dd["file"] == "daily_features_v8.csv").sum())) if "file" in dd.columns else "–",
+                  "daily_features_v8.csv", BG_GREEN)])
+        f1, f2, f3 = st.columns(3)
+        with f1:
+            files = ["Semua file"] + (sorted(dd["file"].unique()) if "file" in dd.columns else [])
+            sel_file = st.selectbox("File", files, key="dd_file")
+        with f2:
+            roles = sorted(dd["role"].dropna().unique()) if "role" in dd.columns else []
+            sel_roles = st.multiselect("Peran kolom", roles, default=roles)
+        with f3:
+            q = st.text_input("Cari kolom / deskripsi", "", key="dd_q")
+        view = dd.copy()
+        if sel_file != "Semua file":
+            view = view[view["file"] == sel_file]
+        if "role" in view.columns and roles:
+            view = view[view["role"].isin(sel_roles) | view["role"].isna()]
+        if q:
+            mask = pd.Series(False, index=view.index)
+            for c in ("kolom", "deskripsi", "business_meaning"):
+                if c in view.columns:
+                    mask |= view[c].astype(str).str.contains(q, case=False, regex=False, na=False)
+            view = view[mask]
+        st.caption(f"Menampilkan {num_id(len(view))} dari {num_id(len(dd))} entri · merah = target · oranye = kolom dengan “racun data”.")
+        cols = [c for c in ["file", "kolom", "tipe_data", "role", "deskripsi", "business_meaning", "catatan"] if c in view.columns]
+        view = view[cols]
+
+        def hl(row):
+            if row.get("kolom") == "label_defisit_besok":
+                return ["background-color:#FFD6D6"] * len(row)
+            if "RACUN" in str(row.get("tipe_data", "")):
+                return ["background-color:#FFE2BF"] * len(row)
+            return [""] * len(row)
+        try:
+            show_df(view.style.apply(hl, axis=1), height=420)
+        except Exception:
+            show_df(view, height=420)
+
+    # ── Kelompok fitur ───────────────────────────────────────────────────────
+    section("Feature engineering — kelompok fitur harian",
+            "Setiap kolom daily_features_v8.csv dikelompokkan menurut perannya.")
+    cols_all = [c for c in C["dy_all"].columns if c not in ("fase", "bulan_ts")]
+    grp = pd.DataFrame({"Kolom": cols_all, "Kelompok": [feature_group(c) for c in cols_all]})
+    cnt = grp["Kelompok"].value_counts().rename_axis("Kelompok").reset_index(name="Jumlah").sort_values("Jumlah")
+    fig = px.bar(cnt, x="Jumlah", y="Kelompok", orientation="h", color_discrete_sequence=[PURPLE], text="Jumlah")
+    fig.update_traces(textposition="outside", cliponaxis=False)
+    fig.update_yaxes(title="")
+    show(fig, 120 + 38 * len(cnt), "Jumlah kolom per kelompok")
+    show_df(grp.groupby("Kelompok")["Kolom"].apply(lambda s: ", ".join(s)).reset_index())
+    n_feat = int((~grp["Kelompok"].isin(["Identitas", "Target"])).sum())
+    callout(f"{b(n_feat)} kolom fitur dibangun dari data transaksi: lag & rolling window menangkap kebiasaan belanja, "
+            f"fitur kalender/musiman menangkap payday effect dan Harbolnas, sedangkan fitur turunan risiko "
+            f"(misalnya <code>days_to_ruin</code>) merangkum kondisi saldo.")
+
+
+# =============================================================================
+#  HALAMAN 9 — UNDUH DATA
+# =============================================================================
+def csv_block(label: str, key: str, builder, filename: str, signature: tuple) -> None:
+    """Data besar dibuat hanya saat diminta; di-cache pada session sesuai filter."""
+    state = f"csv_{key}"
+    if st.button(f"⚙️ Siapkan {label}", key=f"prep_{key}"):
+        st.session_state[state] = (signature, builder().to_csv(index=False).encode("utf-8"))
+    cached = st.session_state.get(state)
+    if cached and cached[0] == signature:
+        call_stretch(st.download_button, f"📥 Unduh {label}", data=cached[1], file_name=filename,
+                     mime="text/csv", key=f"dl_{key}")
+    elif cached:
+        st.caption("Filter berubah — siapkan ulang file.")
+
+
+def page_unduh(C: dict) -> None:
+    hero("Unduh Data", "Ekspor data sesuai filter di sidebar", badge="Ekspor")
+    sig = (C["tipe_sel"], str(C["date_range"][0]), str(C["date_range"][1]))
+    st.caption(f"Filter aktif: {len(C['tipe_sel'])} tipe pengguna · {date_id(C['date_range'][0])} – {date_id(C['date_range'][1])}")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown(f"**Transaksi bersih** · {num_id(len(C['tx']))} baris")
+        csv_block("transaksi", "tx", lambda: C["tx"], "finpredict_transaksi.csv", sig)
+        st.markdown(f"**Fitur harian** · {num_id(len(C['dy']))} baris")
+        csv_block("fitur harian", "dy", lambda: C["dy"].drop(columns=["fase", "bulan_ts"]),
+                  "finpredict_fitur_harian.csv", sig)
+    with c2:
+        st.markdown("**Dokumen & hasil evaluasi**")
+        for key, label, fname in [("dictionary", "Data Dictionary", "finpredict_data_dictionary.csv"),
+                                  ("categories", "Category Mapping", "finpredict_category_mapping.csv"),
+                                  ("model_results", "Hasil Model", "finpredict_model_results.csv"),
+                                  ("ab_results", "Hasil A/B Testing", "finpredict_ab_results.csv")]:
+            df = read_optional(C, key)
+            if df is not None:
+                call_stretch(st.download_button, f"📥 {label}", data=df.to_csv(index=False).encode("utf-8"),
+                             file_name=fname, mime="text/csv", key=f"dl_{key}")
+
+    section("Inventaris file")
+    labels = {"transactions": "Transaksi bersih", "daily": "Fitur harian", "scaled": "Fitur ter-scale",
+              "raw": "Data mentah", "categories": "Mapping kategori", "split": "Info split",
+              "model": "Model XGBoost", "dictionary": "Data Dictionary", "model_results": "Hasil model",
+              "ab_results": "Hasil A/B"}
+    inv = []
+    for key, (name, _) in FILE_SPECS.items():
+        p = C["paths"].get(key)
+        inv.append({"File": name, "Isi": labels[key], "Status": "✅ ditemukan" if p else "⚠️ tidak ada",
+                    "Lokasi": str(p.relative_to(ROOT)) if p and ROOT in p.parents else (str(p) if p else "–")})
+    show_df(pd.DataFrame(inv))
+
+
+# =============================================================================
+#  7. SIDEBAR, FILTER, ROUTING
+# =============================================================================
+PAGE_FUNCS = {
+    "🏠 Ringkasan": (page_ringkasan, True),
+    "🧹 Data Wrangling": (page_wrangling, False),
+    "🔎 Eksplorasi Pengeluaran": (page_eksplorasi, True),
+    "⚠️ Risiko Defisit": (page_risiko, True),
+    "🚨 Early Warning": (page_early_warning, True),
+    "🤖 Evaluasi Model": (page_model, False),
+    "⚖️ A/B Testing": (page_ab, False),
+    "📚 Data Dictionary": (page_dictionary, False),
+    "📥 Unduh Data": (page_unduh, True),
+}
+
+
+def reset_filters(tipe_all: list, d_min, d_max) -> None:
+    st.session_state["f_tipe"] = tipe_all
+    st.session_state["f_date"] = (d_min, d_max)
+
+
+def sidebar(tx_all: pd.DataFrame, n_users_all: int):
+    tipe_all = sorted(map(str, tx_all["tipe_user"].unique()))
+    d_min, d_max = tx_all["tanggal_transaksi"].min().date(), tx_all["tanggal_transaksi"].max().date()
+    st.session_state.setdefault("page", PAGE_LABELS[0])
+    st.session_state.setdefault("f_tipe", tipe_all)
+    st.session_state.setdefault("f_date", (d_min, d_max))
+
+    with st.sidebar:
+        st.markdown(f'<div class="fp-brand"><div class="t">FINPREDICT</div>'
+                    f'<div class="s">Analytics · v{APP_VERSION}</div></div>', unsafe_allow_html=True)
+        page = st.radio("Navigasi", PAGE_LABELS, key="page", label_visibility="collapsed")
+        st.markdown("---")
+        st.markdown("**🎛️ Filter global**")
+        tipe_sel = st.multiselect("Tipe pengguna", tipe_all, key="f_tipe")
+        date_sel = st.date_input("Periode", min_value=d_min, max_value=d_max, key="f_date")
+        st.button("↺ Reset filter", on_click=reset_filters, args=(tipe_all, d_min, d_max))
+        st.markdown("---")
+        st.caption(f"Tim {TEAM_ID} · Coding Camp 2026 powered by DBS Foundation")
+        st.caption("Data: simulasi (01_data_generator.py)")
+
+    if isinstance(date_sel, (list, tuple)) and len(date_sel) == 2:
+        start, end = date_sel
+    else:
+        start, end = d_min, d_max
+        st.sidebar.info("Pilih tanggal akhir untuk menerapkan rentang; sementara memakai seluruh periode.")
+    return page, tuple(tipe_sel), (start, end)
+
+
 def main() -> None:
-    with st.spinner("Memuat FinPredict AI..."):
-        df_daily, errs             = load_daily()
-        df_trx                     = load_transactions()
-        model, model_ok, model_msg = load_model()
-        scalers, scalers_ok        = load_scalers()
+    paths = {k: find_file(k) for k in FILE_SPECS}
+    if not (paths["transactions"] and paths["daily"]):
+        missing_data_screen(paths)
+        return
 
-    if errs:
-        st.error(f"**Data wajib tidak ditemukan:** {errs[0]}")
-        st.info("Letakkan `daily_features_v8.csv` di folder yang sama dengan `07_dashboard.py` atau subfolder `data/`.")
-        st.stop()
+    tx_all = load_transactions(str(paths["transactions"]))
+    dy_all = load_daily(str(paths["daily"]))
+    n_users_all = int(tx_all["user_id"].nunique())
 
-    filters = render_sidebar(df_daily)
-    page    = filters["page"]
+    page, tipe_sel, (start, end) = sidebar(tx_all, n_users_all)
+    t0, t1 = pd.Timestamp(start), pd.Timestamp(end)
+    tx = tx_all[tx_all["tipe_user"].isin(tipe_sel) & tx_all["tanggal_transaksi"].between(t0, t1)]
+    dy = dy_all[dy_all["tipe_user"].isin(tipe_sel) & dy_all["tanggal_transaksi"].between(t0, t1)]
 
-    if   "Executive" in page: page_executive(df_daily, df_trx, filters, model, scalers, model_ok)
-    elif "Spending"  in page: page_spending(df_daily, df_trx, filters, model_ok)
-    elif "LSTM"      in page: page_lstm(df_daily, filters, model, model_ok, model_msg, scalers, scalers_ok)
-    elif "Risk"      in page: page_risk(df_daily, filters, model, model_ok, scalers)
-    elif "Behavior"  in page: page_behavior(df_daily, filters, model_ok)
-    elif "Category"  in page: page_category(df_trx, filters, model_ok)
-    elif "A/B"       in page: page_ab(model_ok)
-    elif "Data"      in page: page_data(df_daily, df_trx, filters, model_ok)
+    C = {"paths": paths, "tx_all": tx_all, "dy_all": dy_all, "tx": tx, "dy": dy,
+         "n_users_all": n_users_all, "n_users": int(tx["user_id"].nunique()),
+         "tipe_sel": tipe_sel, "date_range": (start, end)}
+
+    func, needs_filtered = PAGE_FUNCS[page]
+    if needs_filtered and (tx.empty or dy.empty):
+        hero("Tidak ada data", "Filter global tidak menyisakan data", badge="Filter")
+        st.warning("Tidak ada data pada kombinasi filter ini. Perluas rentang tanggal atau pilih tipe pengguna lain.")
+        return
+    func(C)
 
 
 if __name__ == "__main__":
